@@ -532,7 +532,8 @@ ourselves," never "merge the PR" — we do not apply upstream diffs. Our-code an
   log, 2026-06-30.
 - **GEPA / DSPy 3.x compat** (#13, #14, #35, #46, #48, #73, #91, #109, #137-core, #142-core,
   #153, #155, #159, #167, #168, #173, #177, #178, #183): moot —
-  we pin `dspy>=3.2.0,<3.3` + a gepa git override and call the modern API
+  we use `dspy[litellm]>=3.4.1,<3.5` and released `gepa==0.1.4`, without a Git
+  dependency override, and call the modern API
   (`max_full_evals`, `reflection_lm`, 5-arg metric); the SkillModule "GEPA mutates
   `signature.instructions`" fix is already in (`skill_module.py`).
 - **Skill-text extraction** (#5, #24, #49, #146, #174): done — `skill_text` is a property over

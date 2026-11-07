@@ -131,7 +131,7 @@ uv run python -m evolution.skills.evolve_skill --skill X --create-pr --pr-draft
 ## Safety
 
 ```bash
-# Abort cleanly when cumulative LM cost exceeds a ceiling (worst-case overshoot: one call)
+# Abort subsequent LM calls after recorded cumulative cost exceeds the ceiling
 uv run python -m evolution.skills.evolve_skill --skill X --max-total-cost-usd 5.00
 
 # Run your own command as a deploy gate after the framework's gate passes (nonzero exit -> reject)
@@ -140,6 +140,14 @@ uv run python -m evolution.tools.evolve_tool --tool X --manifest Y \
 ```
 
 On cost abort, `gate_decision.json` carries `decision="aborted"`, `reason="cost_ceiling_exceeded"`, and the full `cost_summary`. The `--benchmark-cmd` hook receives `EVOLVED_PATH`, `BASELINE_PATH`, `RUN_DIR`, `TARGET_NAME`, `ARTIFACT_TYPE` and runs under `/bin/sh -c` (invoke binaries by full name; the command string is yours — don't pass strings you didn't write).
+
+Sync and async LM calls share the cost/auth ledger. Abort checks run before the
+next request; calls already in flight can still add cost. For prompt sections,
+empty or abstained baseline/evolved validation arms abort with
+`reason="cl_eval_incomplete"` and suppress `--apply`. The compiled-floor probe
+has the same rule. Inspect `validation_stage` and `validation_error` in the
+[gate decision](data_models.md#incomplete-validation-variant-prompt-section)
+to identify the missing evidence before rerunning.
 
 `--benchmark-cmd` is artifact-agnostic — the same hook backs the skill, tool, and code evolvers (for code it is the full-suite deploy tier). That makes it the **broad-benchmark regression gate** for the skill path: to reject a skill that improves its own eval but regresses a *broad* capability benchmark, run that benchmark on both arms inside the command and exit nonzero past a floor. The hook is a binary exit-code gate — it hands you both `$BASELINE_PATH` and `$EVOLVED_PATH`; running each arm and choosing the regression floor is yours (a 2%-absolute floor reproduces the conventional benchmark-gate threshold):
 

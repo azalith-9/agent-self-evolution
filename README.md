@@ -34,6 +34,11 @@ cd agent-self-evolution
 uv sync
 ```
 
+Requires Python `>=3.10,<3.15`. The lockfile uses DSPy 3.4.1 with the LiteLLM
+engine and released GEPA 0.1.4. Install `uv sync --extra miprov2` to enable
+the fallback optimizer. See [dependency constraints](docs/dependencies.md)
+for the provider compatibility and upgrade boundaries.
+
 **Evolve a skill with Hermes Agent.** Running Hermes? No env vars — it auto-detects `~/.hermes/config.yaml` for provider, model, and credentials.
 
 ```bash
@@ -84,7 +89,8 @@ python -m evolution.orchestrator --spec examples/orchestrator/sample_run.yaml --
 See [`examples/orchestrator/sample_run.yaml`](examples/orchestrator/sample_run.yaml) for the spec format.
 Each phase keeps its artifacts under `phases/<spec-index>/<phase>-<target>/`, so
 repeated targets with different settings retain separate results. The index is
-zero-based and remains the same when using `--only` or `--resume`.
+zero-based, padded to four digits, and remains the same when using `--only` or
+`--resume`.
 
 ## Use the Gate Without Evolution
 
@@ -130,7 +136,18 @@ Full evidence, CIs, and validity threats: **[headroom experiments](reports/asymm
 
 ## Guardrails
 
-Every evolved variant must pass: (1) the full test suite (`pytest tests/ -q`, 100%); (2) size limits (skills ≤15KB, tool descriptions ≤500 chars); (3) caching compatibility (no mid-conversation changes); (4) semantic preservation (no drift from the original purpose); and (5) human PR review — never a direct commit.
+Each artifact passes its own deployment checks. Skills and tool descriptions
+use static constraints and held-out quality checks; prompt sections use real-agent
+behavioral validation. A prompt-section run aborts if either validation arm is
+empty or contains abstained tasks, including the compiled-floor probe. Tool-code
+repairs must preserve the public surface and pass held-out or oracle checks;
+file scope is rechecked after every validation subprocess so modified tests
+cannot be reused as evidence.
+
+Validation restores the original artifact bytes and permissions. Repository-wide
+tests are a development check (`uv run pytest tests/ -q`); broader candidate
+benchmarks can be supplied with `--benchmark-cmd`. Shipping controls and the
+human-review boundary are described in the [usage guide](docs/usage.md).
 
 ## Operating the Sentinel
 
@@ -158,4 +175,4 @@ See **[docs/operating_the_sentinel.md](docs/operating_the_sentinel.md)** for the
 
 ## License
 
-MIT — © 2026 [jramos](https://github.com/jramos) and [Nous Research](https://github.com/NousResearch)
+MIT — © 2026 [azalith-9](https://github.com/azalith-9) / [jramos](https://github.com/jramos) / [Nous Research](https://github.com/NousResearch)

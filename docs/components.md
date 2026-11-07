@@ -50,7 +50,7 @@ Reference of the major modules in `evolution/`. Each entry: what it owns, the pu
 - `BudgetAwareProposer(baseline_chars, max_growth=0.2, safety_margin=0.10)` — call instance is `__call__(candidate, reflective_dataset, components_to_update) -> dict[str, str]`.
 
 **Implementation notes:**
-- Required because `gepa.optimize`'s `reflection_prompt_template` kwarg is unconditionally rejected when `DspyAdapter` is in use (`gepa/api.py:317-321`). DSPy's documented extension point is `instruction_proposer: ProposalFn` on `dspy.GEPA`.
+- Uses DSPy's `instruction_proposer: ProposalFn` extension point on `dspy.GEPA`. The DSPy adapter supplies its own proposal path, so the framework retains custom proposers for character budgets and sentinel preservation.
 - Prompt-engineering choices are deliberate (countdown framing, "at most N chars", loss-frame, one-shot tight example) — references are inline in the source.
 - `safety_margin` (default 0.10) tightens the prompt's stated target relative to the validator's bar to compensate for observed ~8-9% LM overshoot. Default lands at +10pp prompt vs +20pp validator.
 - Soft enforcement: if the LM overshoots, log `WARNING` but pass the proposal through — hard truncation would corrupt mid-sentence and could lose the very change that helped.
@@ -100,7 +100,7 @@ Reference of the major modules in `evolution/`. Each entry: what it owns, the pu
 
 **Load-bearing settings on the synthetic generator:**
 - `max_tokens=16000` on the judge LM. Bumped from 4000 after `eval_dataset_size=60` truncated JSON output mid-string. Without this: JSONDecodeError → process exit.
-- `request_timeout=120, num_retries=5` — dataset gen is a single bursty call; 5×120s = 10min worst case.
+- `request_timeout=120, num_retries=5` — per-attempt timeout plus DSPy's retry budget. This is not a hard wall-clock ceiling for dataset generation.
 
 **Split logic** (synthetic): ratios from `EvolutionConfig.train_ratio` / `val_ratio` / `holdout_ratio` are normalized to actually sum to 1; holdout is no longer just "whatever's left." Default ratios `0.5/0.40/0.50` normalize to ≈ 0.36/0.29/0.36 of N (≈ 54/43/53 at the current `eval_dataset_size=150` default).
 
@@ -128,7 +128,7 @@ Reference of the major modules in `evolution/`. Each entry: what it owns, the pu
 - `LLMJudge(config)` with `score(task_input, expected_behavior, agent_output, artifact_size=None, max_size=None) -> FitnessScore`. Uses `dspy.ChainOfThought(JudgeSignature)` against the eval model.
 - `make_skill_fitness_metric(judge, baseline_skill_text, max_growth) -> callable` — closure returning the GEPA-shaped 5-arg metric.
 
-**Why scores are typed `str`** in `JudgeSignature.OutputField`: scores arrive as text from the LLM and are clamped to `[0,1]` in `_clamp_to_unit()`. Declaring them as `str` keeps the typeguard quiet without per-field float-coercion ceremony.
+**Why scores are typed `str`** in `JudgeSignature.OutputField`: scores arrive as text from the LLM. `_clamp_to_unit()` owns numeric conversion, clamping to `[0,1]`, and the neutral fallback for malformed LM output.
 
 **Empty-output handling:** if `prediction.output` is empty, the metric returns `score=0.0, feedback="Agent produced empty output"` and logs `WARNING`. Empty output is a real upstream failure signal (timeout, content filter, malformed prompt) that GEPA can't otherwise distinguish from a wrong answer.
 
@@ -142,7 +142,7 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 
 **`_score_behavioral_example`** is the behavioral-example branch. The metric's top-of-closure check `if hasattr(prediction, "_closed_loop_task_id"):` routes a behavioral `dspy.Example` (one per closed-loop task, added to the trainset when `--closed-loop-mode trainset|both`) to this helper. It reads `_candidate_text` + `_closed_loop_task_id` off the Prediction (stuffed there by `ToolModule.forward` on the behavioral branch), asks the cache for the per-task verdict, and returns `Prediction(score=float(verdict.passed), feedback="[BEHAVIORAL] task <id>: pass|fail|abstain …")`. Judge is never called on behavioral examples. Score is deterministic over candidate text (cache key) so GEPA's predictor-vs-module byte-identity contract holds automatically.
 
-**LM hardening:** `request_timeout=60, num_retries=5` on the judge LM. 60s = 6× P99 of slowest observed `gpt-4.1-mini` call (9.8s). 5×60s = 5min worst case before raising.
+**LM hardening:** the judge LM uses `engine="litellm"`, `request_timeout=60`, and `num_retries=5`. DSPy owns retries and disables LiteLLM's own retry budget; the timeout applies per attempt. See [dependencies.md](dependencies.md) for the shared LM compatibility contract.
 
 ## evolution/core/behavioral_example.py — closed-loop task → dspy.Example builder
 
@@ -227,11 +227,13 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 
 ## evolution/core/lm_timing_callback.py — LM observability
 
-**Owns:** per-LM-call timing, heartbeat warnings, and per-attempt litellm failure logging.
+**Owns:** per-LM-call timing, heartbeat warnings, per-attempt LiteLLM failure logging, and token/cost accounting.
 
 **Public surface:**
 - `LMTimingCallback(timer_factory=threading.Timer)` — DSPy `BaseCallback` subclass. Register globally via `dspy.configure(callbacks=[LMTimingCallback()])`.
-- `register_litellm_failure_callback()` — installs `_log_litellm_failure` into `litellm.failure_callback`. Idempotent + lock-guarded against TOCTOU on concurrent first-import.
+- `register_litellm_failure_callback()` — installs sync and async failure hooks. Idempotent and lock-guarded; auth failures set the shared abort sentinel.
+- `register_litellm_cost_callback()` — installs sync and async success hooks that record usage and cost in `COST_LEDGER`.
+- `CostLedger` — aggregates LM and agent costs. Guards on `BaseLM.__call__` and `BaseLM.acall` reject the next request after a pending cost/auth abort. Both paths use the same ledger.
 
 **Heartbeat tiers** (`_HEARTBEAT_TIERS`):
 - 60s → DEBUG (cold-cache calls cross this legitimately; WARNING here would train the user to ignore heartbeats)
@@ -239,7 +241,7 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 - 300s → WARNING
 - 600s → WARNING
 
-**Why two surfaces:** `BaseCallback.on_lm_end` only fires once per logical call — it hides retries. Without `litellm.failure_callback`, a 5×60s retry loop on a flaky API looks like a single 5-minute LM call. The pair (callback + failure hook) gives both visibility into call duration and visibility into individual retry attempts.
+**Why separate surfaces:** `BaseCallback.on_lm_end` fires once per logical call. LiteLLM failure hooks expose individual attempts; success hooks retain the raw response's usage fields before DSPy converts it into text outputs. Async calls require separate coroutine callbacks. All framework LM constructors select the LiteLLM engine explicitly so these hooks remain active.
 
 **`timer_factory` is injectable** so tests use a `FakeTimer.advance(seconds)` double instead of monkeypatching intervals + `time.sleep(0.2)` — deterministic, sub-millisecond, not flaky on slow CI.
 
@@ -385,12 +387,17 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 4. `dspy.configure(lm=eval_lm)` sets the **global** default LM (not just `dspy.context`) so the passthrough predictor resolves an LM inside GEPA's worker threads — without it, `forward()`'s passthrough call raises "No LM is loaded" in those threads, yielding no trajectories and no proposal.
 5. Inside `_prompt_builder_guard`: saturation pre-flight (baseline behavior on the holdout; aborts/denies on a non-`healthy` band unless `--force-saturation-check`, with non-interactive contexts refusing rather than prompting) followed by GEPA(`PromptModule`, `PromptSectionProposer`, `make_prompt_fitness_metric` + the memoizing splice scorer). Trainset/valset are `_behavioral_examples` (task message + `closed_loop_task_id`).
 6. Select the evolved section via GEPA val-argmax (`detailed_results.best_idx`), reading the body back out of the winning candidate's sentinel region (`_section_text_from_candidate`).
-7. Deploy gate: `ClosedLoopValidator.validate(...)` runs baseline vs evolved on the holdout suite (the same per-task Layer-2 factory + threshold threaded in). `report.decision == "pass"` is the deploy verdict.
+7. Deploy gate: `ClosedLoopValidator.validate(...)` runs baseline vs evolved on the holdout suite (the same per-task Layer-2 factory + threshold threaded in). `require_complete_validation(report)` first requires non-empty arms with no abstained tasks; only then can `report.decision == "pass"` authorize deployment. The compiled-floor probe has the same completeness check.
 8. Write `gate_decision.json`; on a passing gate `--apply` writes the evolved section back into `prompt_builder.py`. `baseline_section.txt` / `evolved_section.txt` are also emitted.
 
 `_run_one_task_score` is the GEPA in-loop scorer: materialize the task fixture into a tmp dir, run the agent against whatever section is currently spliced, `score_task`, return 1.0/0.0 (in-loop abstentions score 0.0 — the deploy gate handles abstentions properly). Budget rides the shared `COST_LEDGER` + `CostCeilingExceeded` kill switch; the ceiling abort writes a `cost_ceiling_exceeded` gate decision.
 
 **`gate_decision.json` additions:** `artifact_type: "prompt_section"`, `target_section: <name>`, `baseline_chars` / `evolved_chars` / `growth_pct`, a `closed_loop` block (the validator decision + pass rates + W/L/T), and `sentinel_failures` (proposer candidates rejected for losing the sentinels). `decision_signal` is always `"closed_loop"`. `--create-pr` is **deferred** for prompt sections (it would pollute the diff with the local override-hook commit) and is recorded as `skipped`; use `--apply` + a manual PR.
+
+Incomplete evidence writes `decision="aborted"`, `reason="cl_eval_incomplete"`,
+`validation_stage="compiled_floor"|"evolved"`, and `validation_error`, and skips
+deployment. Diagnostic reports still treat abstentions as missing evidence;
+the completeness requirement belongs to the prompt deploy path.
 
 ### Supporting modules (`evolution/prompts/`)
 
@@ -434,6 +441,11 @@ Drives an actual agent (`HermesAgentRunner` via `hermes -z`) through a small tas
 - `hermes_runner.py` — `HermesAgentRunner.run(ctx) -> AgentRunResult`. Subprocess `hermes -z "task"` with `HERMES_HOME` + `HOME` redirected to a per-task tmp dir and `cwd` set to the task's fixture dir. Scores from the session JSON only — `hermes -z` exit code is unreliable (returns 0 on agent-loop crashes). Tolerates both tool-call shapes Hermes emits (`{"function": {"name": ...}}` nested and flat `{"name": ...}`). Errors (timeout, no session JSON written, malformed JSON) become abstentions in the report.
 - `task.py` — `Task` + `TaskSuite.from_jsonl`. JSONL with comment + blank-line tolerance; sha256 of the file bytes lands in the report so regression-by-curation (silently dropping a hard task) is auditable. Carries the convention-verdict fields `required_cmd_substr` / `forbidden_cmd_substr` (consumed by `score_task`'s `expected_action:"convention"` branch).
 - `artifact_installer.py` — `ArtifactInstaller` Protocol + `HermesToolDescriptionInstaller`, `HermesPromptSectionInstaller`, `SkillFileInstaller`, and `ClaudeAppendPromptInstaller`. The tool/prompt installers splice into the live install via `apply_evolved` / `HermesPromptSource.write`; the skill and Claude installers write into a caller-owned workdir so the user's original is never touched (`ClaudeAppendPromptInstaller`'s `target_path` is the `--append-system-prompt-file` the runner injects). All return `sha256(target_path)` post-install for the validator's drift check. Helpers: `atomic_write_bytes`, `verify_python_parses`, `sha256_of`.
+
+  `atomic_write_bytes(path, data, *, mode=None)` preserves an existing target's
+  permission bits unless an explicit mode is supplied. Validator and prompt-guard
+  restoration use the mode captured before validation, even if an installer or
+  agent changed it during execution.
 - `validator.py` — `ClosedLoopValidator.validate(inputs) -> ValidationReport`. The dangerous path: mutates the user's hermes-agent install in place. Three defenses:
   - `fcntl.flock` sentinel in the parent dir of the target tool file — concurrent harness runs (or a user running `hermes` interactively) fail fast with `ConcurrentRunError`.
   - `.cl_backup` written atomically and `ast.parse`-validated before being trusted for restore. The harness refuses to start if a stale, valid backup exists, naming the file so the user can `mv` it manually.
@@ -442,7 +454,7 @@ Drives an actual agent (`HermesAgentRunner` via `hermes -z`) through a small tas
   - `evolved.pass_rate >= baseline.pass_rate`
   - `n_losses == 0` OR `n_wins >= 2 * n_losses`
 
-  `score_task` supports four verdict modes, all agent-agnostic: trigger membership (`expected_tools` / `forbidden_tools`, optionally + Layer-2 content judge), `test_command` (skill-side), `expected_action:"patch"` (skill-patch), and `expected_action:"convention"` (`_score_convention` — Bash-command substring adherence, used by the Claude backend).
+  `score_task` supports four verdict modes, all agent-agnostic: trigger membership (`expected_tools` / `forbidden_tools`, optionally + Layer-2 content judge), `test_command` (skill-side), `expected_action:"patch"` (skill-patch), and `expected_action:"convention"` (`_score_convention` — execution-aware shell-command adherence, used by the Claude backend). Convention parsing distinguishes quoted/escaped operators from separators, recognizes adjacent operators and newlines, and excludes comments and heredoc bodies from command matching. Here-string contents remain command input rather than new commands.
 - `closed_loop.py` — Click CLI. Exit 0 on `pass`, 1 on `regression`. Drop-in compatible with `--benchmark-cmd`.
 - `suites/*.jsonl` — JSONL task suites. `patch.jsonl` targets the `patch` vs `write_file` boundary; `write_file.jsonl` and `search_files.jsonl` cover the symmetric direction; `claude_conventions.jsonl` is the example Claude convention suite (`expected_action:"convention"` + `required_cmd_substr` / `forbidden_cmd_substr`, bounded to `{fixture_dir}`). Each task carries `task_id`, `user_message` (with optional `{fixture_dir}` placeholder), `expected_tools`, `forbidden_tools`, `fixture_setup` (relative-path → file-content dict materialized into a per-task tmp dir).
 
@@ -455,8 +467,13 @@ Unlike Tiers 1-3 (GEPA evolving artifact *text* scored by a judge or behavioral 
 - `harvest.py` — mine a target repo's git history for bug-fix-shaped commits (a commit touching both a tool and its test) and validate each into a `HarvestedBug` *organism* (buggy `parent_sha`, fix `fix_sha`, the `bug_tests` it makes pass, a failing-output excerpt). It records **git refs, not blobs** (sources re-materialized at runtime), and a candidate is valid iff the parent *fails ≥1 test the fix passes* — established in a real worktree so fixture-using tests are in scope. `stratify()` round-robins by tool to keep a sample diverse.
 - `worktree.py` — `WorktreeEnv` gives **two-layer isolation**: a detached git worktree (never touches the user's checkout) + an editable venv (`pip install -e <worktree> --no-deps`, inheriting base deps). `assert_authoritative(package)` empirically confirms the package resolves entirely from the worktree before any test runs, else aborts — the guard against "Frankenstein" mixed original/repaired imports. Bytecode writes are disabled so same-size repairs recompile. `prune_orphan_worktrees()` self-heals leaks from hard-killed runs.
 - `repair.py` — `RepairEngine` drives the loop: **whole-file rewrite** (the proposer emits the complete corrected module), checked by `freeze_check`, run against the visible test, with violations/failures fed back for up to `max_rounds` (default 5). A round is accepted only when the test passes *and* the rewrite is surface-preserving. `build_dspy_proposer(lm)` wraps a `dspy.LM` as the proposer.
-- `freeze_check.py` — zero-LM, deterministic guards. `extract_public_surface` + `surface_drift` reject removed/renamed functions/classes/`*_SCHEMA`s or changed signatures (additions and private helpers are allowed; signature key = parameter names/order/defaults presence, ignoring annotations). `check_diff_shape` enforces a retain floor (default 80%) so a repair can't pass by deleting the failing branch.
+- `freeze_check.py` — zero-LM, deterministic guards. `extract_public_surface` + `surface_drift` reject removed/renamed functions/classes/`*_SCHEMA`s or changed signatures (additions and private helpers are allowed; signature key = parameter names/order/defaults presence, ignoring annotations). Keyword-only default presence is frozen per parameter, so moving an optional default to a required parameter is rejected even when the total default count is unchanged. `check_diff_shape` enforces a retain floor (default 80%) so a repair can't pass by deleting the failing branch.
 - `gate.py` — the deploy gate, the project's distinctive asset. `run_code_gate` (held-out-split model): repair landed → surface freeze → file scope (only the target tool changed, no test touched) → **held-out split** (a frozen test the proposer never saw must pass — the anti-gaming core; a hard-coded visible-test value fails here) → baseline-diff regression floor (only *new* failures vs. base are rejected). `run_code_oracle_gate` (measurement model): surface freeze + file scope + bug_tests pass + **oracle match** over the full fix-commit test file. A config sanity check rejects held-out == visible (that would make the central check a tautology). Honest limitation: oracle-match catches behavior breaks but not pure input-hardcoding — defended separately by the fuzzed differential in `audit_gaming.py`.
+
+  Both code gates recheck file scope immediately after every held-out, bug-test,
+  oracle, and regression-floor subprocess, including the baseline half of a
+  floor comparison. A process that modifies tests or another module causes a
+  rejection before those files can be reused as evidence.
 - `evolve_code.py` — single-tool repair CLI: `python -m evolution.code.evolve_code --repo <r> --tool tools/foo.py --visible-test … --holdout-test …` (also `--repair-rounds`, `--proposer-model`, `--floor-path`, `--min-retain-ratio`, `--benchmark-cmd`, and `--create-pr` for an opt-in **draft** human-review PR). Writes `gate_decision.json` + `repair_trace.json`.
 - `campaign.py` / `campaign_report.py` — staged measurement over harvested organisms (`--max-organisms`, `--seeds`, `--max-cost-usd`). The **organism is the honest unit** (seeds within one are heavily correlated); the report gives cluster-honest estimands — Wilson CIs, ICC, design-effect, effective-N — with a Wilson-lower **futility stop** (escalate N only while GREEN holds). Writes `campaign_ledger.jsonl` (resumable) + `campaign_report.json`.
 - `audit_gaming.py` / `audit_report.py` — adversarial audit of the oracle gate (direct-inject hardcoded candidate / gaming-proposer / honest-control arms), crediting the oracle only when the rejecting guard is `oracle_match`, with a post-hoc fuzzed differential (`real_fix` / `slip` / `not_fuzzable`) on fresh inputs. Reported as a per-organism map, never a scalar pass-rate.
@@ -474,6 +491,10 @@ The supply-side front-end to Tier 4: find bugs in a target repo's recent git str
 ## New core + validation modules (post-Tier-3)
 
 - `core/lineage.py` — `write_lineage` reduces GEPA's `detailed_results` (when `track_stats=True`) to a JSON-able `lineage.json`: candidate parents, val aggregate/subscores, `deployed_idx` (not always GEPA's `best_idx` — the knee-point selector may pick another), and both `seed_text` and `live_baseline_text` (so a reviewer can separate pre-GEPA drift from search changes).
+
+  DSPy 3.4 validation subscores are mappings keyed by example ID. Persistence
+  writes their values in ascending ID order, keeping the JSON score-list shape;
+  list-shaped input remains supported. See [data_models.md](data_models.md#lineagejson--dossiermd-gepa-runs).
 - `core/dossier.py` — `render_dossier` turns that lineage into a maintainer-local `dossier.md` (selection rationale, lineage depth, live-baseline → deployed diff). Local artifact only — never a PR body, no per-hunk attribution.
 - `core/search_telemetry.py` / `core/saturation_telemetry.py` — forward-looking per-run ledgers (`search_ledger.jsonl`, `saturation_ledger.jsonl`, shared at the nearest `output/` ancestor). Search telemetry records val-discrimination (`distinct_val_frac` — how much of selection was a coin-flip among tied candidates); saturation telemetry records the pre-flight band/scores for **every** run including aborts (the archive only kept `avg_baseline` for completed runs), joinable back to `gate_decision.json` by `run_id`.
 - `validation/suite_compiler.py` — `compile_suite_floor` renders a zero-LM "floor" prompt from a suite's *generic* constraints (never per-instance specifics; `assert_no_holdout_leakage` enforces this). On the best headroom case it recovered ~79-85% of hand-tuned prompting — a strong pre-flight signal that GEPA spend may be unjustified.

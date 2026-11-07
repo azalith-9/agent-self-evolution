@@ -2,7 +2,10 @@
 
 How `agent-self-evolution` decides which model to call for each LM role.
 
-Last verified against `evolution/core/hermes_provider.py`, `evolution/core/codex_lm.py`, and `evolution/core/nous_lm.py` on 2026-05-25. Unchanged behavior since the OpenAI Codex Responses API + Nous Portal OAuth + AWS Bedrock provider work landed.
+The resolution and OAuth adapters live in `evolution/core/hermes_provider.py`,
+`codex_lm.py`, and `nous_lm.py`. All framework LM constructors select
+`engine="litellm"`; [dependencies.md](dependencies.md) describes the supported
+DSPy/GEPA versions and callback contract.
 
 ## TL;DR
 
@@ -140,7 +143,7 @@ The framework reads OAuth credentials from `auth.json credential_pool["openai-co
 
 Refresh is **in-memory only** — the framework does not write back to `~/.hermes/auth.json`. Long evolutions (>30 minutes on a fresh token) need to re-run `hermes auth add openai-codex` if the on-disk store also needs to be refreshed, but each evolve invocation refreshes its own runtime state independently.
 
-**What's not supported:** streaming via the Responses endpoint (evolution doesn't stream), Codex-specific reasoning-effort overrides (DSPy's defaults work for gpt-5-class), and tool-call message conversion beyond what DSPy's `_convert_chat_request_to_responses_request` already handles. If a Codex 401 surfaces during a run, the standard auth-error panel renders with the `hermes auth add openai-codex` recovery hint.
+**What's not supported:** streaming via the Responses endpoint (evolution doesn't stream), Codex-specific reasoning-effort overrides (DSPy's defaults work for gpt-5-class), and tool-call message conversion beyond DSPy's chat-to-Responses conversion. If a Codex 401 surfaces during a run, the standard auth-error panel renders with the `hermes auth add openai-codex` recovery hint.
 
 ## Nous Portal OAuth + agent_key
 
@@ -237,7 +240,17 @@ Per-provider recovery commands the framework suggests:
 
 If a credential goes bad mid-run (rare — long sessions on short-TTL OAuth, key revocation in flight), the same `HermesProviderError` surfaces from the next LM call rather than producing silent `score=0.0` evaluations. The mid-run path is defense-in-depth on top of preflight; under normal use the preflight catches everything.
 
-The framework does not refresh OAuth tokens — that's Hermes's job. Honor the `last_status: exhausted` + `last_error_reset_at` fields Hermes writes to `auth.json` when it detects a bad credential; we skip those entries until Hermes's cooldown passes, mirroring Hermes's own pool rotation logic.
+Codex and Nous adapters refresh credentials in memory; Hermes owns the persisted
+`auth.json` store. The resolver honors `last_status: exhausted` and
+`last_error_reset_at`, skipping exhausted entries until Hermes's cooldown passes.
+Re-authenticate through Hermes when the persisted grant is no longer usable.
+
+Nous inference handles both LiteLLM's authentication error and DSPy's wrapped
+`LMAuthError`: sync and async calls force one agent-key re-mint and retry once.
+If the new key is rejected too, the adapter raises `HermesProviderError` with
+the `hermes model` recovery command. Auth/rate classification also recognizes
+typed `LMAuthError` / `LMRateLimitError` when their messages omit HTTP status
+codes. The sync and async LM entry points share the pending auth-abort guard.
 
 ### Skipping preflight
 

@@ -63,10 +63,9 @@ cost record per call, and the next-call cost ceiling in sync and async modes.
 
 ### `openai>=1.0.0`
 
-The OpenAI SDK that litellm uses for `openai/*` model strings. Default models in `EvolutionConfig` are all OpenAI:
-- `optimizer_model` / `judge_model` defaults: `openai/gpt-4.1`
-- `eval_model` default: `openai/gpt-4.1-mini`
-- `reflection_model` CLI default: `openai/gpt-5-mini`
+The OpenAI SDK that LiteLLM uses for `openai/*` model strings and the Codex
+Responses API path. Roles can inherit Hermes provider configuration or use
+explicit model flags; see [model_resolution.md](model_resolution.md).
 
 DSPy manages retries and invokes the LiteLLM engine with its own retries disabled. `request_timeout` is a per-attempt timeout, so a retry budget does not imply a hard wall-clock ceiling for an entire optimization.
 
@@ -211,6 +210,6 @@ Worth noting because they often appear in similar projects:
 - **No Pydantic.** Pure stdlib `dataclasses` + `typing.Protocol`. DSPy uses Pydantic internally but no Pydantic models are exposed by this codebase.
 - **No FastAPI / Flask / web framework.** CLI-only.
 - **No database.** All state is files (`output/`, `datasets/`, `~/.claude/history.jsonl`, etc.).
-- **No async runtime.** `dspy.Evaluate(num_threads=4)` uses threads, not asyncio. `pytest-asyncio` is declared but unused.
+- **No additional async runtime dependency.** Evaluation uses threads; provider adapters also support async calls through Python's `asyncio`.
 - **No Docker / container scaffolding.** Plain `uv sync` workflow.
-- **No CI config in repo.** Tests are run locally via `pytest`.
+- **CI uses GitHub Actions.** [.github/workflows/tests.yml](../.github/workflows/tests.yml) runs Ruff and pytest with mocked provider/agent calls.

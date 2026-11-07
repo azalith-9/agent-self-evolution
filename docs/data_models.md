@@ -227,6 +227,21 @@ Scoring rule (`score_task` in `report.py`) — returns `(passed: bool, abstained
 - **`test_command` set** (skill-side): pass iff the command exits 0 in `fixture_dir`.
 - **Default (trigger membership):** passes iff `expected_tools` were invoked AND no `forbidden_tools` were invoked. Empty `expected_tools` short-circuits to true; empty `forbidden_tools` is no-op. When a `layer2_judge_fn` is supplied (prompt-section save suites), a passing Layer 1 additionally requires the content judge to score `>= layer2_threshold`.
 
+Convention matching checks command execution positions rather than arbitrary
+mentions. Quoted/escaped operators remain token content; adjacent separators
+and newlines split commands. Comments, heredoc bodies, and here-string input
+do not become extra commands. This is inspection of recorded shell text,
+not execution of that text.
+
+For a task requiring `bin/check` and forbidding `pytest`:
+
+| Recorded command | Verdict |
+|---|---|
+| `./bin/check` | Pass |
+| `./bin/check&&pytest` | Fail: forbidden command invoked |
+| `echo './bin/check'` | Fail: wrapper only mentioned |
+| `./bin/check # pytest` | Pass: forbidden name is in a comment |
+
 ### TaskSuite (`evolution/validation/task.py`)
 
 ```python
@@ -372,7 +387,7 @@ When `passed=false`, the top-level `decision` is `"reject"` and `reason` is `"be
 
 ### Cost-ceiling-abort variant
 
-Written when `--max-total-cost-usd` is set and cumulative LM cost exceeds the ceiling. The next LM call after the ceiling trips raises `CostCeilingExceeded` from `LMTimingCallback.on_lm_start`, which the orchestrator catches at top level. Worst-case overshoot is one LM call past the ceiling — `cost_at_abort_usd` shows what was actually spent.
+Written when `--max-total-cost-usd` is set and recorded cumulative LM cost exceeds the ceiling. Guards on `BaseLM.__call__` and `BaseLM.acall` raise `CostCeilingExceeded` before the next request, and the orchestrator catches it at top level. Calls already in flight can finish and add cost; `cost_at_abort_usd` records the total observed at abort.
 
 ```json
 {
@@ -601,7 +616,7 @@ Runs of `evolution.prompts.evolve_prompt_section` (Phase 3) write the same `sche
 |---|---|---|
 | `artifact_type` | `"prompt_section"` | Disjoint from `"skill"` / `"tool_description"`. |
 | `target_section` | `str` | The `prompt_builder.py` constant whose text was evolved (e.g. `MEMORY_GUIDANCE`). |
-| `decision` | `"deploy" \| "reject" \| "denied" \| "dry_run" \| "aborted"` | `"denied"` lands on a saturation pre-flight default-deny; `"dry_run"` when the run was asked to evaluate without splicing; `"aborted"` on cost-ceiling / interrupt. |
+| `decision` | `"deploy" \| "reject" \| "denied" \| "dry_run" \| "aborted"` | `"denied"` lands on a saturation pre-flight default-deny; `"dry_run"` when the run was asked to evaluate without splicing; `"aborted"` on cost-ceiling / interrupt / incomplete validation. |
 | `decision_signal` | `"closed_loop"` | Always `"closed_loop"` here — the synthetic value never appears on this path. |
 | `baseline_chars` / `evolved_chars` / `growth_pct` | int / int / float | Size telemetry; growth informs the closed-loop required-gain threshold but is not gated on a bootstrap. |
 | `closed_loop` | `dict` | `{decision, decision_reasons, baseline_pass_rate, evolved_pass_rate, n_wins, n_losses, n_ties}` — the deploy gate's primary evidence (sourced from `ValidationReport` over the behavioral suite). |
@@ -616,6 +631,24 @@ Runs of `evolution.prompts.evolve_prompt_section` (Phase 3) write the same `sche
 - `avg_baseline` / `avg_evolved` — no synthetic holdout mean. The analogous numbers live inside `closed_loop` as `baseline_pass_rate` / `evolved_pass_rate`.
 - `dataset` — there is no synthetic eval dataset and no `dataset` block with per-source/per-category counts; the behavioral suite is the JSONL passed via `--tasks`. `run_inputs` records the run config (models, seed, iterations, holdout-ratio, `eval_source: "closed_loop"`), not the suite path or sha.
 - `knee_point` — Pareto knee-point selection over a synthetic valset doesn't apply; candidates are chosen on behavioral score.
+
+#### Incomplete-validation variant (prompt section)
+
+Prompt deployment requires non-empty baseline and evolved arms with no
+abstained tasks. `require_complete_validation` enforces this for both the
+compiled-floor probe and the final evolved-candidate report. Failure writes
+these diagnostic fields and suppresses `--apply`:
+
+| Field | Value / meaning |
+|---|---|
+| `decision` | `"aborted"` |
+| `reason` | `"cl_eval_incomplete"` |
+| `decision_signal` | `"closed_loop"` |
+| `validation_stage` | `"compiled_floor"` or `"evolved"` |
+| `validation_error` | Names the empty arm or abstained task IDs |
+
+This requirement is specific to prompt deployment. Shared diagnostic
+`ValidationReport` scoring still treats abstentions as missing evidence.
 
 #### Saturation-denied variant (prompt section)
 
@@ -858,6 +891,11 @@ Sentinel scan output (`evolution/monitor/queue.py`); `--attempt-top` annotates r
 ```
 
 `deployed_idx` is explicit because the knee-point selector may pick a candidate other than GEPA's `best_idx`; `seed_text` vs `live_baseline_text` separates pre-GEPA drift from search changes. `dossier.md` (`evolution/core/dossier.py`) renders that lineage as a maintainer-local review: selection rationale (val_aggregate vs seed, candidate position, discovery count, lineage depth), an optional pre-GEPA-drift diff (when `seed_text != live_baseline_text`), and the live-baseline → deployed diff. Local artifact only — never a PR body, no per-hunk attribution.
+
+`val_subscores` remains a list of score values. DSPy 3.4 supplies a mapping
+keyed by validation example ID; serialization orders values by ascending ID.
+For example, `{1: 0.6, 0: 0.2}` becomes `[0.2, 0.6]`, preserving the existing
+JSON shape. List-shaped input remains supported; unavailable scores are `null`.
 
 ### Suite sidecars: `<suite>.jsonl.noise.json` / `.discrimination.json`
 

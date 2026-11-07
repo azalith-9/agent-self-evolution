@@ -191,8 +191,13 @@ Behavioral triggers are often stochastic, so both the GEPA fitness and the deplo
 
 ### Exit conditions
 - `0` on a `deploy` decision (or a `--dry-run`).
-- `1` on `reject` (the holdout deploy gate found a regression), `denied` (saturated baseline default-denied non-interactively), or `aborted` (cost ceiling).
+- `1` on `reject` (the holdout deploy gate found a regression), `denied` (saturated baseline default-denied non-interactively), or `aborted` (cost ceiling or incomplete validation).
 - `ValueError` at startup if the suite has fewer than 2 tasks.
+
+An empty baseline/evolved report or any abstained task aborts prompt deployment
+with `reason="cl_eval_incomplete"`. The compiled-floor probe follows the same
+rule. `validation_stage` and `validation_error` identify the failed check;
+`--apply` is suppressed. See [the gate payload](data_models.md#incomplete-validation-variant-prompt-section).
 
 ### Signal strength (read before evolving a stochastic behavioral section)
 Evolving a section whose target behavior fires stochastically (e.g. proactive skill-patching) has a real precondition: **the holdout must contain at least one high-base-rate task** — a task the *intended* behavior passes reliably — so GEPA's val-argmax can tell a good candidate from the baseline. With only weak/low-base-rate holdout tasks, selection is noise and reverts to the baseline regardless of `--iterations` or budget; the run emits a `val_signal_warning` (recorded in `gate_decision.json`) when the holdout baseline rates are degenerate (all ≈0 or all ≈1). Put high-signal tasks in **both** train (so the reflection LM learns from them) and holdout (so selection has a signal).
@@ -352,6 +357,12 @@ Implementations live in `evolution/core/skill_sources.py`. To plug in a new agen
 
 ## Output artifacts
 
+The multi-phase orchestrator overrides each phase's output directory with
+`<run-root>/phases/<spec-index:04d>/<phase>-<target-slug>/`. The zero-based index
+comes from the original spec before `--only` filtering and stays stable on
+`--resume`, so repeated targets and slug collisions keep separate artifacts.
+See [the orchestrator example](../examples/orchestrator/sample_run.yaml).
+
 Per-run directory: `output/<skill_name>/<YYYYMMDD_HHMMSS>/`. Contents vary by outcome:
 
 | File | When | Contents |
@@ -367,18 +378,20 @@ Per-run directory: `output/<skill_name>/<YYYYMMDD_HHMMSS>/`. Contents vary by ou
 ## DSPy integration points
 
 - **`dspy.configure(lm=..., callbacks=[LMTimingCallback()], warn_on_type_mismatch=False)`** — done once in `evolve()`. The callback gives end-to-end LM observability; `warn_on_type_mismatch=False` silences spam from signatures that pass empty/None into `str` inputs.
-- **`dspy.LM(model, ..., request_timeout, num_retries)`** — `request_timeout` and `num_retries` are forwarded to litellm's tenacity layer. Three different timeout regimes:
+- **`dspy.LM(model, engine="litellm", ..., request_timeout=..., num_retries=...)`** — the per-attempt timeout reaches LiteLLM; DSPy owns retries and disables LiteLLM's own retry budget. These settings do not impose a total wall-clock ceiling. Three timeout regimes:
   - judge LM (`fitness.py`): `request_timeout=60, num_retries=5`
   - dataset gen LM (`dataset_builder.py`): `request_timeout=120, num_retries=5`
   - reflection LM (`evolve_skill.py:_default_gepa_runner`): `request_timeout=300, num_retries=2` (lower retries to fast-fail and trigger MIPROv2 fallback)
 - **`dspy.GEPA(metric, auto, reflection_lm, seed, track_stats=True, instruction_proposer=...)`** — `track_stats=True` is required for knee-point selection; `instruction_proposer=BudgetAwareProposer(...)` is required for the char budget.
+- **`gepa_kwargs={"acceptance_criterion": ...}`** — released GEPA 0.1.4 supports the framework's `improvement_or_equal` default and `strict_improvement` alternative. Validation subscores in DSPy 3.4 are keyed by example ID; [lineage serialization](data_models.md#lineagejson--dossiermd-gepa-runs) retains score lists.
 - **`dspy.MIPROv2(metric, auto="light", init_temperature=0.5, seed)`** — fallback only. Requires the `[miprov2]` extra (lazy `optuna` import).
 - **`dspy.Evaluate(devset, metric, num_threads=4, provide_traceback=True, max_errors=...)`** — used for holdout evaluation. Returns `EvaluationResult(score=mean*100, results=[(ex, pred, score), ...])`.
 
 ## litellm integration points
 
-- **`litellm.failure_callback`** — module-level list. `register_litellm_failure_callback()` appends `_log_litellm_failure` if not already present. Idempotent + lock-guarded.
-- The callback signature is litellm's documented `(kwargs, exception, start_time, end_time)` shape. Logged at `WARNING`.
+- `register_litellm_failure_callback()` installs sync and async failure callbacks; each receives `(kwargs, exception, start_time, end_time)` and logs at `WARNING`.
+- `register_litellm_cost_callback()` installs sync and async success callbacks feeding the shared cost ledger. Registration is idempotent and lock-guarded.
+- `BaseLM.__call__` and `BaseLM.acall` check pending cost/auth aborts before execution. Typed DSPy `LMAuthError` / `LMRateLimitError` are recognized alongside LiteLLM errors. See [dependencies.md](dependencies.md) for engine and callback compatibility.
 
 ## Test surfaces locked by tests (don't break without versioning)
 

@@ -424,7 +424,7 @@ sequenceDiagram
     CLI->>V: validate(ValidationInputs(tool, suite, baseline_artifact, evolved_artifact))
     V->>V: refuse_if_stale_backup_exists(.cl_backup)
     V->>FS: acquire fcntl.flock on parent dir (else ConcurrentRunError)
-    V->>FS: atomic_write_bytes(.cl_backup, target.read_bytes())
+    V->>FS: capture original permission bits; atomic_write_bytes(.cl_backup, target.read_bytes())
     V->>V: verify_python_parses(.cl_backup) — trusted for restore
     loop baseline phase, then evolved phase
         V->>Inst: install(artifact_source) — splice description into target
@@ -439,7 +439,7 @@ sequenceDiagram
             V->>V: score_task(expected, forbidden, run) → (passed, abstained)
         end
     end
-    V->>FS: atomic_write_bytes(target, .cl_backup.read_bytes())  # always restore
+    V->>FS: atomic_write_bytes(target, backup_bytes, mode=original_mode)  # always restore
     V->>FS: .cl_backup.unlink()
     V->>Rep: ValidationReport(baseline, evolved, delta, decision, ...)
     Rep-->>CLI: written to output/validation/<tool>/<ts>/validation_report.json
@@ -626,7 +626,7 @@ sequenceDiagram
 
     CLI->>Guard: enter(installer.target_path)
     Guard->>FS: refuse if stale .cl_backup; flock parent dir (LOCK_EX|NB)
-    Guard->>FS: atomic_write_bytes(.cl_backup, target.read_bytes())
+    Guard->>FS: capture original permission bits; atomic_write_bytes(.cl_backup, target.read_bytes())
     opt not --skip-saturation-check
         CLI->>Sat: saturation_preflight(baseline_module, holdout, metric, eval_lm, baseline_text)
         Sat->>Scorer: behavioral score of baseline on each holdout task
@@ -655,10 +655,10 @@ sequenceDiagram
         GEPA->>Prop: reflect on failures → sentinel-preserving candidate
     end
     GEPA-->>CLI: optimized module with detailed_results
-    CLI->>Guard: exit → atomic_write_bytes(target, .cl_backup); unlink backup; release flock
+    CLI->>Guard: exit → restore original bytes and mode; unlink backup; release flock
 ```
 
-Everything that mutates the file lives **inside** the guard, which holds an exclusive `flock` (the same lock name the deploy-gate `ClosedLoopValidator` uses — sequenced before it, never nested) and restores the original bytes on exit. The saturation pre-flight scores the baseline behaviorally on the holdout; a non-`healthy` band (e.g. `no_headroom` on an already-tuned section) **default-denies in non-interactive contexts** unless `--force-saturation-check`, writing a `decision="denied"` gate before GEPA spends a cent. The compound per-task verdict is two layers: **Layer 1** is trigger membership (did the `memory` tool fire, via `expected_tools` / `forbidden_tools`), **Layer 2** is the `SaveCallJudge` scoring `memory(action=add|replace)` content against the task's `expected_save_content` rubric (`remove` is not a save; a passing Layer 1 with no save action scores a vacuous 1.0 on Layer 2). GEPA mutates only the sentinel-delimited region of the passthrough predictor's instructions; the `PromptSectionProposer` rejects any reflection-LM output that fails sentinel preservation.
+Everything that mutates the file lives **inside** the guard, which holds an exclusive `flock` (the same lock name the deploy-gate `ClosedLoopValidator` uses — sequenced before it, never nested) and restores the original bytes and permission bits on exit, even if validation changed the mode. The saturation pre-flight scores the baseline behaviorally on the holdout; a non-`healthy` band (e.g. `no_headroom` on an already-tuned section) **default-denies in non-interactive contexts** unless `--force-saturation-check`, writing a `decision="denied"` gate before GEPA spends a cent. The compound per-task verdict is two layers: **Layer 1** is trigger membership (did the `memory` tool fire, via `expected_tools` / `forbidden_tools`), **Layer 2** is the `SaveCallJudge` scoring `memory(action=add|replace)` content against the task's `expected_save_content` rubric (`remove` is not a save; a passing Layer 1 with no save action scores a vacuous 1.0 on Layer 2). GEPA mutates only the sentinel-delimited region of the passthrough predictor's instructions; the `PromptSectionProposer` rejects any reflection-LM output that fails sentinel preservation.
 
 ### Phase D — Deploy gate (closed-loop on the holdout), persist, apply
 
@@ -685,15 +685,27 @@ sequenceDiagram
         end
     end
     V-->>CLI: ValidationReport(baseline_pass_rate, evolved_pass_rate, n_wins/n_losses, decision)
-    CLI->>FS: write gate_decision.json (artifact_type="prompt_section", decision=deploy|reject)
-    alt decision == pass AND --apply
-        CLI->>Src: write(section_name, evolved_text) — live section updated in place
+    CLI->>CLI: require_complete_validation(report)
+    alt empty arm or abstained task
+        CLI->>FS: write aborted gate (reason=cl_eval_incomplete, validation_stage=evolved)
+    else complete evidence
+        CLI->>FS: write gate_decision.json (artifact_type=prompt_section, decision=deploy or reject)
+        opt decision == pass AND --apply
+            CLI->>Src: write(section_name, evolved_text) — live section updated in place
+        end
     end
 ```
 
 The selected candidate is GEPA's val-argmax (`detailed_results.best_idx`) — there's no knee-point parsimony pass on the prompt-section path. The deploy gate is a fresh `ClosedLoopValidator.validate` over the **holdout** suite, with its own backup/restore + `flock` (it runs after the Phase C guard has already exited and restored the file, so the two never nest). Its decision is closed-loop only: pass-rate no-regression plus `n_wins >= 2 * n_losses`. The gate decision is written with `artifact_type="prompt_section"`, `target_section`, `baseline_chars` / `evolved_chars` / `growth_pct`, a `closed_loop` block (both pass-rates + win/loss/tie counts), and `sentinel_failures`. `--create-pr` records a `skipped` PR block (deferred for sections); `--apply` is the only way to ship, writing the evolved text into the live section.
 
 **Empirical anchors.** The real `MEMORY_GUIDANCE` section saturates — it scored 1.0 across the holdout (`no_headroom` band) and the harness correctly default-denied a non-interactive run before GEPA started. To exercise the full deploy path, an adversarially-weakened baseline (via `--baseline-override-file`) evolved `0.67 → 1.00` pass-rate with 2 wins / 0 losses on the holdout, clearing the closed-loop gate and deploying. The saturating-real-section result is the expected, correct outcome, not a bug: there is no headroom to evolve into when the section already passes every behavioral task.
+
+The optional compiled-floor probe also requires complete baseline and evolved
+arms before its verdict can select a deployable fallback. An empty report or
+any abstained task aborts with `cl_eval_incomplete`; `validation_stage` is
+`compiled_floor` or `evolved`, and `validation_error` identifies the missing
+evidence. Diagnostic abstention scoring is unchanged. This check applies to
+both Hermes and Claude prompt backends.
 
 ## Workflow 13: Evolve a CLAUDE.md convention (Claude Code backend)
 
@@ -791,6 +803,7 @@ sequenceDiagram
     Eng-->>CLI: RepairResult(fixed, rounds)
     CLI->>G: run_code_gate(env, tool, visible, holdout, floor_paths)
     G->>W: freeze → file scope → run_test(holdout) → regression floor (repaired vs base)
+    Note over G,W: recheck file scope immediately after each test subprocess
     G-->>CLI: CodeGateResult(deploy | reject)
     alt deploy
         CLI->>CLI: write gate_decision.json + repair_trace.json (+ optional draft PR)
@@ -798,6 +811,11 @@ sequenceDiagram
 ```
 
 The **held-out test must differ from the visible test** — that frozen split the proposer never saw is the anti-gaming core (a fix that hard-codes the visible test's expected value fails it). The **measurement campaign** (`python -m evolution.code.campaign`) swaps this held-out split for the upstream fix-commit's full test set plus an oracle match, harvests many organisms, and aggregates them cluster-honestly with a Wilson futility-stop — see `campaign_report.json` and the code-path `gate_decision.json` in [data_models.md](data_models.md).
+
+Both code gates reject a test or other module modified during a validation
+subprocess before it can be reused in another check. Surface freezing also
+preserves each keyword-only parameter's required/optional status, rather than
+only comparing the total number of defaults.
 
 ## Workflow 15: Triage sentinel — scan, then optionally attempt (Tier 5)
 
@@ -846,11 +864,11 @@ The scan is free and schedulable; the attempt is the only step that spends and *
 | Static fail on evolved | reject, no holdout run | `evolved_FAILED.md` + `gate_decision.json` |
 | Quality gate reject | reject after holdout | `evolved_FAILED.md` + `gate_decision.json` |
 | GEPA exception | MIPROv2 fallback (unless `--no-fallback`) | `output/<skill>/gepa_failure.log` |
-| Reflection LM stall | `TimeoutError` after `300s × 2` retries → MIPROv2 fallback | `run.log` (heartbeats + `[litellm RETRY/FAIL]`) |
-| Judge LM stall | `TimeoutError` after `60s × 5` retries → propagates up to GEPA → fallback | `run.log` |
+| Reflection LM stall | `request_timeout=300`, DSPy retry budget `2`; exhausted requests raise `LMTimeoutError` and can trigger MIPROv2 fallback | `run.log` (heartbeats + `[litellm RETRY/FAIL]`) |
+| Judge LM stall | `request_timeout=60`, DSPy retry budget `5`; exhausted requests raise `LMTimeoutError` into the evaluation path | `run.log` |
 | Dataset gen JSON truncation | already fixed (`max_tokens=16000`); legacy: `JSONDecodeError` | `run.log` |
 | MIPROv2 missing optuna | `ImportError` re-raised with GEPA failure as `__cause__` | console |
-| `--max-total-cost-usd` ceiling crossed | `decision="aborted"` `gate_decision.json` written; next LM call raises `CostCeilingExceeded` from `LMTimingCallback.on_lm_start`; orchestrator catches at top level | `gate_decision.json` (`cost_at_abort_usd`, `cost_ceiling_usd`, `cost_summary`) |
+| `--max-total-cost-usd` ceiling crossed | `decision="aborted"` `gate_decision.json` written; guards on `BaseLM.__call__` / `BaseLM.acall` raise `CostCeilingExceeded` before the next request | `gate_decision.json` (`cost_at_abort_usd`, `cost_ceiling_usd`, `cost_summary`) |
 | `--benchmark-cmd` exits nonzero | deploy gate flipped to reject with `reason="benchmark_failed"`; benchmark block in gate_decision | `gate_decision.json` (`benchmark` block) |
 | Closed-loop validator stale `.cl_backup` | `StaleBackupError` on startup, refuses to run; clear message names the file for manual `mv` | console only |
 | Closed-loop validator concurrent run | `ConcurrentRunError` (`fcntl.flock` non-blocking acquire fails) | console only |

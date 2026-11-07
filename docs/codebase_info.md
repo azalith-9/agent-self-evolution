@@ -10,7 +10,7 @@ Snapshot of the repository's basic shape: language, layout, sizes, and runtime d
 | Package import name | `evolution` |
 | Version | `0.1.0` |
 | License | MIT |
-| Language | Python `>=3.10` |
+| Language | Python `>=3.10,<3.15` |
 | Repository | https://github.com/jramos/agent-self-evolution |
 | Build backend | `setuptools>=68` |
 | Test runner | `pytest` (config in `pyproject.toml`) |
@@ -151,14 +151,18 @@ evolution/
 | `generate_findings_report.py` (repo root) | ~195 | provenance-checked synthesis-report renderer |
 | **Total** | **~19K code / ~23K raw** | non-blank-non-comment vs. raw `wc -l` across `evolution/`; per-file rows are indicative |
 
-Test suite: 100 test files under `tests/code/`, `tests/core/`, `tests/monitor/`, `tests/skills/`, `tests/tools/`, `tests/validation/`, `tests/analysis/`. **~1,614 tests** collected.
+Tests mirror the package areas under `tests/`. Use
+`uv run pytest tests/ --collect-only -q` for the current inventory. Provider
+compatibility tests exercise real DSPy/LiteLLM execution with mocked responses;
+GEPA integration tests use scripted LMs, without paid provider calls.
 
 ## Runtime dependencies
 
 | Package | Version | Why |
 |---|---|---|
-| `dspy` | `>=3.2.0,<3.3` | Pinned — internal `dspy.utils.callback.BaseCallback` is used by `lm_timing_callback.py` |
-| `litellm` | `>=1.82.0,<2.0` | Pinned — `litellm.failure_callback` (module-level list mutation) and `dspy.LM` forwarding `request_timeout`/`num_retries` |
+| `dspy[litellm]` | `>=3.4.1,<3.5` | Explicit LiteLLM engine; custom OAuth LM interfaces require DSPy 3.4 compatibility |
+| `gepa` | `==0.1.4` | Released optimizer with the acceptance-criterion API; no Git or uv override |
+| `litellm` | `>=1.82.0,<2.0` | Sync/async cost and failure callbacks; DSPy owns retries and forwards per-attempt timeouts |
 | `openai` | `>=1.0.0` | Underlying SDK litellm wraps |
 | `click` | `>=8.0` | CLI option parsing |
 | `rich` | `>=13.0` | Console panels + tables |
@@ -166,9 +170,11 @@ Test suite: 100 test files under `tests/code/`, `tests/core/`, `tests/monitor/`,
 | `pyyaml` | `>=6.0` | `reports/<name>_prose.yaml` loading for both report renderers |
 | `numpy` | `>=1.24` | `evolution/core/stats.py:paired_bootstrap` |
 
-Optional extras:
-- `[dev]` — `pytest>=7.0`, `pytest-asyncio>=0.21`
-- `[miprov2]` — `dspy[optuna]>=3.2.0,<3.3` (only needed when GEPA fails and the MIPROv2 fallback fires)
+Development dependencies are a `dev` dependency group, installed by `uv sync`:
+pytest, pytest-asyncio, pre-commit, and Ruff. The optional `[miprov2]` extra adds
+`dspy[optuna]>=3.4.1,<3.5` for the fallback optimizer.
+
+See [dependencies.md](dependencies.md) for the complete compatibility contract.
 
 Tier 4 code repair needs no extra engine dependency — it reuses the DSPy/litellm stack as a whole-file proposer. The population-search `darwinian-evolver` was evaluated and dominated by plain best-of-N at equal budget, so it was not adopted (see `reports/darwinian_evolver_evaluation.md`); the former `[darwinian]` extra has been removed.
 
