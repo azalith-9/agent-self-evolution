@@ -166,7 +166,7 @@ Inferred from the existing source — follow these unless you have a specific re
 
 `[meta:test-workflow]` Cross-ref: [docs/interfaces.md](docs/interfaces.md), [docs/workflows.md Workflow 8](docs/workflows.md)
 
-- Run all tests: `uv run pytest tests/ -q` from the repo root (CI runs this on Python 3.10–3.13). Use `uv run pytest tests/ --collect-only -q` for the current inventory.
+- Run all tests: `uv run pytest tests/ -q` from the repo root (CI runs this on Python 3.10–3.14). Use `uv run pytest tests/ --collect-only -q` for the current inventory.
 - All tests use mocks/fixtures for LM + agent calls — no API keys, no live `hermes`/`claude` required (the Claude runner tests parse captured stream-json; the sandbox/refusal paths are unit-tested without spawning a subprocess).
 - Live runs (not the test suite) need `OPENAI_API_KEY` (reflection/judge LMs); the Claude backend additionally needs `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and macOS `sandbox-exec` for containment.
 - The `_skill_source_env` autouse fixture (defined per-module, e.g., `tests/core/test_constraints.py:9`) sets `SKILL_SOURCES_HERMES_REPO` to a `tmp_path` fake repo so discovery doesn't pick up real `~/.hermes` / `~/.claude` installs. Add this fixture to any new test that touches `EvolutionConfig`.
