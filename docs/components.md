@@ -2,6 +2,19 @@
 
 Reference of the major modules in `evolution/`. Each entry: what it owns, the public surface, and the load-bearing implementation details that aren't obvious from the signatures.
 
+## Shared execution controls
+
+The [execution module map](reference/execution-contracts.md#module-responsibilities)
+describes **planned** adapter responsibilities for policy preparation, containment,
+bounded subprocesses, path access, checked Git inspection, and test evidence.
+Execution-related guarantees in this reference describe the target contract,
+unless explicitly identified as recovered behavior. They are not verified
+capabilities of this documentation checkout. The
+[implementation boundary](reference/execution-contracts.md#implementation-boundary)
+records partial recovered behavior, including inherited `PATH` and code gates
+that still consume cooperative evidence. No independent-verifier adapter exists;
+deployment based on cooperative pytest evidence is blocked under the contract.
+
 ## evolution/skills/evolve_skill.py — CLI + orchestrator
 
 **Owns:** the end-to-end `evolve()` flow and the Click CLI (`main`).
@@ -75,7 +88,7 @@ Reference of the major modules in `evolution/`. Each entry: what it owns, the pu
 
 **Public surface:** `EvolutionConfig` dataclass (all fields documented inline, defaults included).
 
-**Important:** `skill_sources` uses `field(default_factory=lambda: discover_skill_sources())`, so the discovery walk runs at config-construction time. Tests use a `_skill_source_env` autouse fixture (see `tests/core/test_constraints.py:9`) to point this at a fake repo.
+**Important:** `skill_sources` uses `field(default_factory=lambda: discover_skill_sources())`, so the discovery walk runs at config-construction time. Tests isolate provider config/auth loading centrally and use synthetic skill-source roots. They neither read developer credentials nor require a global `Path.home()` patch.
 
 ## evolution/core/skill_sources.py — pluggable SKILL.md discovery
 
@@ -208,9 +221,11 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 
 **Two-stage gate logic** (in `_check_growth_with_quality_gate`):
 - `required_improvement = max(0, slope * (growth - free))`
-- If `required == 0` (growth ≤ free threshold): **no_regression_only** branch — pass on `mean ≥ 0`.
+- If `required == 0` (growth ≤ free threshold): use the configured gate mode.
+  **no_regression_only** passes on `mean ≥ 0`; **non_inferiority** requires
+  `lower_bound > -inferiority_tolerance`, rejecting equality at the margin.
 - Else: **dual_check** branch — pass requires `mean ≥ required` AND `lower_bound > 0`.
-- Negative growth (shorter artifact) always falls into the no_regression branch.
+- Negative growth (shorter artifact) uses the configured zero-required-improvement branch.
 - Zero baseline length is treated as zero growth (avoids divide-by-zero).
 
 **Absolute char ceiling** (`_check_absolute_chars`) is independent of growth. Backstops short baselines that legitimately need expansion — a 200-char baseline growing to 1500 is +650% but only 1500 chars absolute.
@@ -221,7 +236,7 @@ Score is **never** modified by `pred_trace` enrichment — GEPA enforces score e
 
 **Public surface:** `paired_bootstrap(baseline_scores, evolved_scores, *, confidence=0.90, n_resamples=2000, seed=42) -> dict` returning `mean`, `lower_bound`, `upper_bound`, `n_examples`, `n_resamples`, `confidence`.
 
-**Method:** basic (reverse-percentile) bootstrap on the per-example improvement vector. Literature-recommended for small N (≤20). BCa is the upgrade path once N≥20 routinely.
+**Method:** percentile bootstrap on the mean per-example improvement vector. The bounds are percentiles of the resampled means, not reflected bounds or BCa intervals.
 
 **Inputs must be paired:** equal-length arrays where index `i` in both refers to the same example. Raises `ValueError` on length mismatch or empty input.
 
@@ -415,7 +430,19 @@ the completeness requirement belongs to the prompt deploy path.
 
 The Claude backend evolves a CLAUDE.md region instead of a `prompt_builder.py` constant. It is three adapter classes behind the **existing** AgentRunner / PromptSource / ArtifactInstaller protocols — the agnostic core (GEPA, `ClosedLoopValidator`, `score_task`) is unchanged. Backend selection lives in a single factory, `build_backend` (`evolution/prompts/backend.py`), which returns a `PromptBackend` bundling `{source, installer, runner, baseline_text, deploy_target}` plus `install_candidate` (validation, via the installer) and `deploy` (`--apply`, via the source — a different file for claude). `evolve_prompt_section` carries **no** per-target branches; adding a third backend is a factory branch + adapter classes, nothing in the driver.
 
-- `evolution/validation/claude_runner.py` — `ClaudeCodeAgentRunner` (implements `AgentRunner`). `run(ctx)` drives `claude -p <msg> --output-format stream-json --verbose --model <m> --no-session-persistence --strict-mcp-config --permission-mode bypassPermissions --add-dir <fixture> --allowedTools <list> [--append-system-prompt-file <file>]`. Runs hermetic: a fresh tmp `HOME` (no ambient `~/.claude` CLAUDE.md / plugins / memory). Filesystem confinement is **OS-enforced** — the subprocess is wrapped in macOS `sandbox-exec` with a write-restrict profile (`_macos_write_sandbox_profile`) that denies writes outside the fixture dir + per-run HOME + temp, confining the native Write/Edit tools (the Claude Code `sandbox` *setting* only confines Bash, so an agent escapes through Write — verified; it is deliberately not used). When OS sandboxing is unavailable the runner raises `SandboxUnavailableError` rather than executing an unconfined agent (override with `require_sandbox=False`). Parses the stream-json (`_parse_stream_json`): assistant `tool_use` content blocks → `tool_calls_seq` + `tool_calls_with_args`; the final `result` event → `total_cost_usd` + token usage. Auth via the `CLAUDE_CODE_OAUTH_TOKEN` env var (**not** `--bare`, which ignores the token). Integrates the shared `CostLedger` — `run()` records the agent cost and enforces the ceiling eagerly, mirroring `HermesAgentRunner`, because convention scoring makes no in-process LM call. Cost resolves actual(>0) → litellm token-pricing estimate (`computed`, so subscription runs that report $0 still meter) → `uncaptured`; an empty/degraded result stream (no tools, text, or tokens) abstains.
+- `evolution/validation/claude_runner.py` — `ClaudeCodeAgentRunner` implements
+  `AgentRunner`. `run(ctx)` invokes `claude -p` with stream-json output,
+  `--no-session-persistence`, `--strict-mcp-config`, the approved tool list, and an
+  optional `--append-system-prompt-file`. A private `HOME`, fresh allowlisted
+  environment, and capability-tested OS scope contain the whole agent, including
+  native Write/Edit tools. The Claude Code `sandbox` setting is not this boundary.
+  Missing required capabilities cause refusal; unconfined diagnostics cannot
+  authorize deployment. Only the selected `CLAUDE_CODE_OAUTH_TOKEN` is forwarded
+  for OAuth authentication. Stream parsing records tool calls, text, and usage;
+  null numeric usage becomes zero while malformed structures remain errors.
+  Cost resolves actual (>0) → token-pricing estimate (`computed`) → `uncaptured`
+  and is eagerly recorded in `CostLedger`. An empty/degraded result abstains.
+  Bounded cleanup precedes result use, and persisted diagnostics are redacted.
 - `evolution/prompts/claude_prompt_source.py` — `ClaudeCodePromptSource` (implements `PromptSource` read/write). Reads/writes a sentinel-delimited region in a CLAUDE.md: `<!-- evolve:NAME start -->` … `<!-- evolve:NAME end -->`. `read(section)` returns the region body (raises `KeyError` if the markers are absent, `ValueError` if duplicated/reversed). `write(section, text)` replaces only the region body via an atomic write, preserving every other byte of the file; when the markers are absent it appends a fresh delimited block at EOF (first-time targets). Used to **seed** GEPA (read the baseline region) and to **deploy** on `--apply` — the only write to the user's real CLAUDE.md.
 - `evolution/validation/artifact_installer.py` — `ClaudeAppendPromptInstaller` (implements `ArtifactInstaller`, alongside the existing installers). Mirrors `SkillFileInstaller`'s don't-touch-the-original contract: `target_path` is a throwaway `append_system_prompt.txt` in a caller-owned workdir; `install(source)` / `install_text(text)` write the candidate there and return its sha256; `verify_backup` requires UTF-8 + non-empty. The runner passes `target_path` to `--append-system-prompt-file`, so each candidate is injected statelessly — **validation never touches the user's CLAUDE.md** (only `--apply`, via the source, writes it).
 - `evolution/validation/report.py` — `_score_convention` + the `expected_action == "convention"` branch in `score_task` (agent-agnostic). Convention-adherence verdict, no LLM judge: pass iff some shell-tool call's command used one of `required_cmd_substr` (the repo wrapper) AND no such command used any of `forbidden_cmd_substr` (the default tool to avoid). The shell tool name is the task's `command_tool` (default `Bash`), so a backend whose shell tool is named differently still scores. Matching is trailing-boundary aware, so forbidden `pytest` matches `python -m pytest` but not `pytest.ini`/`pytest_cache`, while required `bin/check` still matches `./bin/check`. Reads only `tool_calls_with_args`, so it is backend-independent. A convention task must declare a non-empty `required_cmd_substr` (validated at suite-parse time, else it would silently always-fail).
@@ -448,8 +475,8 @@ Drives an actual agent (`HermesAgentRunner` via `hermes -z`) through a small tas
   agent changed it during execution.
 - `validator.py` — `ClosedLoopValidator.validate(inputs) -> ValidationReport`. The dangerous path: mutates the user's hermes-agent install in place. Three defenses:
   - `fcntl.flock` sentinel in the parent dir of the target tool file — concurrent harness runs (or a user running `hermes` interactively) fail fast with `ConcurrentRunError`.
-  - `.cl_backup` written atomically and `ast.parse`-validated before being trusted for restore. The harness refuses to start if a stale, valid backup exists, naming the file so the user can `mv` it manually.
-  - `sha256` verification after every task — a YOLO-mode agent that overwrites the spliced file mid-suite is caught with `ChecksumDriftError` before later tasks silently run a corrupt baseline.
+  - `.cl_backup` written atomically and `ast.parse`-validated before being trusted for restore. Backup inspection and stale-backup recovery guidance occur under the validation lock, so an active run is not mistaken for abandoned state.
+  - `sha256` verification before and after every task, including cached verdicts and reuse of an installed candidate. Drift raises `ChecksumDriftError` before a later task or cached result can certify the wrong artifact.
 - `report.py` — `ValidationReport` (JSON + Rich console rendering) plus the scoring (`score_task`), phase summary (`summarize_phase`), win/loss decomposition (`compute_win_loss`), and the two-condition decision rule (`decide`):
   - `evolved.pass_rate >= baseline.pass_rate`
   - `n_losses == 0` OR `n_wins >= 2 * n_losses`
@@ -465,10 +492,22 @@ Drives an actual agent (`HermesAgentRunner` via `hermes -z`) through a small tas
 Unlike Tiers 1-3 (GEPA evolving artifact *text* scored by a judge or behavioral suite), Tier 4 repairs tool *implementation code* from a failing test, scored by an executable oracle. The data flow is **harvest → worktree → repair → gate**.
 
 - `harvest.py` — mine a target repo's git history for bug-fix-shaped commits (a commit touching both a tool and its test) and validate each into a `HarvestedBug` *organism* (buggy `parent_sha`, fix `fix_sha`, the `bug_tests` it makes pass, a failing-output excerpt). It records **git refs, not blobs** (sources re-materialized at runtime), and a candidate is valid iff the parent *fails ≥1 test the fix passes* — established in a real worktree so fixture-using tests are in scope. `stratify()` round-robins by tool to keep a sample diverse.
-- `worktree.py` — `WorktreeEnv` gives **two-layer isolation**: a detached git worktree (never touches the user's checkout) + an editable venv (`pip install -e <worktree> --no-deps`, inheriting base deps). `assert_authoritative(package)` empirically confirms the package resolves entirely from the worktree before any test runs, else aborts — the guard against "Frankenstein" mixed original/repaired imports. Bytecode writes are disabled so same-size repairs recompile. `prune_orphan_worktrees()` self-heals leaks from hard-killed runs.
+- `worktree.py` — **target execution contract:** `WorktreeEnv` prepares a detached worktree and private editable
+  environment using approved offline dependencies. Setup, authority imports,
+  tests, and benchmarks share the execution policy. `assert_authoritative(package)`
+  verifies every module/namespace path is contained in the worktree rather than
+  sharing a string prefix. Bytecode writes are disabled so same-size repairs
+  recompile. Cleanup removes only owned or verified orphan resources and preserves
+  other active runs. See the [execution adapter contracts](reference/execution-contracts.md).
 - `repair.py` — `RepairEngine` drives the loop: **whole-file rewrite** (the proposer emits the complete corrected module), checked by `freeze_check`, run against the visible test, with violations/failures fed back for up to `max_rounds` (default 5). A round is accepted only when the test passes *and* the rewrite is surface-preserving. `build_dspy_proposer(lm)` wraps a `dspy.LM` as the proposer.
 - `freeze_check.py` — zero-LM, deterministic guards. `extract_public_surface` + `surface_drift` reject removed/renamed functions/classes/`*_SCHEMA`s or changed signatures (additions and private helpers are allowed; signature key = parameter names/order/defaults presence, ignoring annotations). Keyword-only default presence is frozen per parameter, so moving an optional default to a required parameter is rejected even when the total default count is unchanged. `check_diff_shape` enforces a retain floor (default 80%) so a repair can't pass by deleting the failing branch.
 - `gate.py` — the deploy gate, the project's distinctive asset. `run_code_gate` (held-out-split model): repair landed → surface freeze → file scope (only the target tool changed, no test touched) → **held-out split** (a frozen test the proposer never saw must pass — the anti-gaming core; a hard-coded visible-test value fails here) → baseline-diff regression floor (only *new* failures vs. base are rejected). `run_code_oracle_gate` (measurement model): surface freeze + file scope + bug_tests pass + **oracle match** over the full fix-commit test file. A config sanity check rejects held-out == visible (that would make the central check a tautology). Honest limitation: oracle-match catches behavior breaks but not pure input-hardcoding — defended separately by the fuzzed differential in `audit_gaming.py`.
+
+  These are implemented comparison rules, not independent deployment verification.
+  The recovered gate consumes `TestRun.authoritative` for cooperative diagnostic
+  evidence. The proposed gate must additionally validate trusted selection,
+  payload/test identities, independent verdicts, supervisor completion, enforced
+  containment, certified cleanup, and scope before any deploy or PR action.
 
   Both code gates recheck file scope immediately after every held-out, bug-test,
   oracle, and regression-floor subprocess, including the baseline half of a

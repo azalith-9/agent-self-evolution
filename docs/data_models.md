@@ -2,6 +2,20 @@
 
 The dataclasses, schemas, and on-disk formats the framework uses.
 
+**Proposed execution-evidence contract:** the
+[completion requirements](reference/execution-contracts.md#test-evidence) are not
+the implemented schema documented below. Recovered `TestRun` adds completion
+fields defaulting to unknown, but its `authoritative` property checks cooperative
+diagnostic completeness and is still consumed by code gates. It does not establish
+deployment eligibility. Parent-owned exact coverage and payload/test identities,
+supervisor evidence, certified containment/cleanup, and independent verification
+are proposed prerequisites, not fully enforced fields or checks. See the
+[implementation boundary](reference/execution-contracts.md#implementation-boundary).
+Deployment based on cooperative pytest evidence is blocked under that contract;
+the recovered gate can still emit `deploy` without satisfying it.
+Diagnostic `ValidationReport` comparisons and prompt deployment completeness
+remain [separate contracts](reference/execution-contracts.md#validation-and-persistence).
+
 ## EvolutionConfig (`evolution/core/config.py:18`)
 
 ```python
@@ -50,7 +64,7 @@ class EvolutionConfig:
     seed: int = 42                          # forwarded to dataset shuffle + GEPA/MIPROv2
 ```
 
-`skill_sources` runs `discover_skill_sources()` at construction time. Tests use a `_skill_source_env` autouse fixture to point this at a fake repo so they don't pick up real `~/.hermes` or `~/.claude` installations.
+`skill_sources` runs `discover_skill_sources()` at construction time. Tests use synthetic source roots and centrally isolated provider configuration/auth loading so developer Hermes or Claude installations cannot select a live provider or expose credentials.
 
 `val_ratio + holdout_ratio + train_ratio` is **deliberately not 1.0** — the synthetic builder normalizes them to sum to 1, so changing any one shifts the others proportionally. Default normalizes to ≈ 0.36/0.29/0.36 of N (≈ 54 train / 43 val / 53 holdout at the default `eval_dataset_size=150`).
 
@@ -209,7 +223,7 @@ class Task:
     expected_tools: tuple[str, ...] = ()
     forbidden_tools: tuple[str, ...] = ()
     fixture_setup: dict[str, str] = field(default_factory=dict)
-    test_command: Optional[str] = None          # skill-side: pass iff this exits 0 in fixture_dir
+    test_command: Optional[str] = None          # skill-side: diagnostic pass on exit 0 in fixture_dir
     expected_save_content: Optional[str] = None  # Layer-2 rubric for memory-save content
     skills_src: Optional[str] = None
     expected_action: Optional[str] = None        # "patch" | "convention" — action-level verdict mode
@@ -224,7 +238,7 @@ class Task:
 Scoring rule (`score_task` in `report.py`) — returns `(passed: bool, abstained: bool)`; abstention if the runner errored (timeout, no session, parse failure), neither evidence for nor against the artifact. Otherwise the verdict mode is chosen by which fields are set, in priority order:
 - **`expected_action == "patch"`** (with `target_skill` + `stale_token`): pass iff the agent called `skill_manage(action in {patch, edit})` on `target_skill` and the call actually touched the stale token.
 - **`expected_action == "convention"`** (Claude convention suites; `_score_convention`): pass iff some `command_tool` call (default `Bash`) used one of `required_cmd_substr` (the agent used the repo wrapper) AND no such command used any of `forbidden_cmd_substr` (it didn't fall back to the default tool). Substring matching is trailing-boundary aware (forbidden `pytest` won't match `pytest.ini`). No LLM judge — reads only `tool_calls_with_args`, so the verdict is agent-backend-independent. A convention task must declare a non-empty `required_cmd_substr` (rejected at parse time otherwise — it could never pass).
-- **`test_command` set** (skill-side): pass iff the command exits 0 in `fixture_dir`.
+- **`test_command` set** (skill-side): the implemented diagnostic scorer passes iff the command exits 0 in `fixture_dir`. This is not deployment authorization: the proposed execution contract also requires trusted completion, coverage, containment, cleanup, scope, and independent verification. Cooperative pytest records do not satisfy that independence.
 - **Default (trigger membership):** passes iff `expected_tools` were invoked AND no `forbidden_tools` were invoked. Empty `expected_tools` short-circuits to true; empty `forbidden_tools` is no-op. When a `layer2_judge_fn` is supplied (prompt-section save suites), a passing Layer 1 additionally requires the content judge to score `>= layer2_threshold`.
 
 Convention matching checks command execution positions rather than arbitrary
@@ -741,6 +755,14 @@ The code-repair (Tier 4) and triage-sentinel (Tier 5) paths write their own on-d
 
 Written by `evolution/code/evolve_code.py`. Unlike the GEPA variants (bootstrap CI, knee-point, synthetic dataset) this gate is **deterministic-test / oracle** based — no judge, no bootstrap.
 
+**Historical schema example — diagnostic comparison only.** The record below
+illustrates the legacy code-gate format. Its `decision="deploy"` reports the
+legacy comparison result; it lacks required supervisor, containment, cleanup,
+payload/test identity, coverage, and independent-verifier evidence. It is not an
+eligible deployment record under the proposed contract. An authoritative record
+format and its gate consumer remain to be implemented; adding invented success
+fields to this example would not supply evidence.
+
 ```json
 {
   "schema_version": "1",
@@ -822,12 +844,12 @@ Per-round repair record for human review (`evolution/code/trace.py`). No per-hun
 }
 ```
 
-`containment` records how confined the test execution actually was. `sandboxed: true`
-means writes outside the run dir and the OS temp roots were denied by the kernel — reads,
-process-exec and network are not restricted, so it prevents corrupting the checkout or home
-directory rather than providing isolation. `null` means the run environment reported no
-posture (the SWE-bench env and test fakes duck-type the runner), which is deliberately
-distinct from `false`: unknown must never read as known-unconfined.
+`containment` identifies the execution backend and its reported posture. The compact
+example does not by itself establish read, write, network, or cleanup guarantees.
+Deployment requires [capability and completion evidence](reference/execution-contracts.md#requests-and-policies)
+for the current invocation. `null` means unknown posture and differs from `false`;
+neither authorizes deployment. Historical write-only sandbox records remain
+readable without being promoted to evidence of stronger isolation.
 
 ### `campaign_ledger.jsonl` + `campaign_report.json`
 

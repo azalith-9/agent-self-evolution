@@ -25,6 +25,8 @@ readers to the source for exact behavior.
 | **How validation / findings report PDFs are built** | `codebase_info.md` (renderers) → `dependencies.md` (reportlab/pyyaml) |
 | **What flag does X / how to run the CLI** | `interfaces.md` (CLI section) |
 | **Why the deploy gate rejected a run** | `data_models.md` (gate_decision.json) → `components.md` (`constraints.py`) |
+| **Why execution refused or evidence cannot authorize deployment** | [Execution contracts](reference/execution-contracts.md) → [contained repairs](howto/run-contained-repairs.md) |
+| **How to preserve recovered work and apply a local package** | [Local remediation delivery](howto/review-local-remediation.md) |
 | **What's in `gate_decision.json` / `metrics.json`** | `data_models.md` (full schema with examples) |
 | **What's in `validation_report.json` / how scoring works** | `data_models.md` (ValidationReport) → `components.md` (`validation/report.py`) |
 | **Where is X implemented** | `components.md` (component-by-component map) |
@@ -53,6 +55,29 @@ readers to the source for exact behavior.
 - **Always check `git log`** before recommending changes — the project moves fast and a memory-recalled implementation detail may have been changed in a recent PR.
 
 ## Documents in this knowledge base
+
+### Execution safety and local review
+
+The execution safety pages are **[PLANNED - Implementation Pending]** contracts,
+with an explicit [implementation boundary](reference/execution-contracts.md#implementation-boundary).
+Recovered code inherits `PATH` and lacks several deployment-evidence checks.
+Cooperative pytest runs remain deployment-ineligible under this specification;
+the [independent verification path](reference/execution-contracts.md#independent-verification-and-eligible-execution)
+is specified but has no implemented adapter. The offline tutorial verifies only
+suite loading and rendering, not those execution guarantees.
+
+- [Execution safety and trustworthy verdicts](concepts/execution-safety.md) explains
+  containment, process lifetime, authentication recovery, and the diagnostic/deploy boundary.
+- [Execution and evaluation contracts](reference/execution-contracts.md) defines
+  internal adapter obligations, environments, paths, evidence, and compatibility.
+- [Run repairs with contained execution](howto/run-contained-repairs.md) covers
+  prerequisites, configuration, existing controls, and refusal handling.
+- [Validate a task fixture without an agent](tutorials/validate-task-fixtures.md)
+  demonstrates offline suite loading and fixture boundaries.
+- [Review and deliver a local remediation](howto/review-local-remediation.md)
+  covers checkout preservation, finding dispositions, verification, and local handoff.
+
+### Framework references
 
 | File | Purpose |
 |---|---|

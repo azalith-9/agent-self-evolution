@@ -2,6 +2,17 @@
 
 Step-by-step traces of the framework's main flows.
 
+Repository execution across these flows is subject to the **proposed**
+[execution safety model](concepts/execution-safety.md) and
+[completion contracts](reference/execution-contracts.md). The recovered
+implementation does not enforce all of them; see the
+[implementation boundary](reference/execution-contracts.md#implementation-boundary).
+Existing comparison outcomes below do not certify deployment eligibility under
+the proposed contract. For local operation,
+see [contained repairs](howto/run-contained-repairs.md), the
+[offline fixture tutorial](tutorials/validate-task-fixtures.md), and
+[local remediation delivery](howto/review-local-remediation.md).
+
 ## Workflow 1: Evolve a skill (synthetic dataset, deploy path)
 
 The standard happy path. Broken into four phases for legibility — see [architecture.md](architecture.md) for the top-level flowchart that ties them together.
@@ -180,7 +191,13 @@ sequenceDiagram
     CLI-->>U: ✓ Evolution improved skill by +0.054 (+6.1%)
 ```
 
-Holdout costs ≈ 1 × |holdout| judge calls when the saturation pre-flight ran (the baseline scores are reused from `SaturationReport.holdout_per_example`); 2 × |holdout| when `--no-saturation-check` is set. The bootstrap runs on the per-example improvement vector; `validate_growth_with_quality` then applies the curve `required(growth) = max(0, slope * (growth - free))` and only deploys if both `mean ≥ required` and `lower_bound > 0`.
+Holdout costs ≈ 1 × |holdout| judge calls when the saturation pre-flight ran (the
+baseline scores are reused from `SaturationReport.holdout_per_example`); 2 ×
+|holdout| when `--no-saturation-check` is set. The bootstrap runs on per-example
+improvements. Positive required improvement needs both `mean ≥ required` and
+`lower_bound > 0`. Zero required improvement uses the configured rule: `mean ≥ 0`
+for no-regression, or strict `lower_bound > -inferiority_tolerance` for
+non-inferiority. Equality at the non-inferiority margin fails.
 
 ## Workflow 2: Evolve a skill (rejected on quality gate)
 
@@ -344,7 +361,13 @@ Tests are organized:
 - `tests/tools/` — cross_tool_regression, evolve_tool_closed_loop, evolve_tool_v2_acceptance (integration test: `DspyAdapter.evaluate` arithmetic on a hand-built minibatch with mixed judge + behavioral examples), evolve_tool_validation_flow, hermes_source, session_mining, tool_judge, tool_module, tool_module_behavioral
 - `tests/validation/` — artifact_installer, closed_loop_cli, hermes_runner, report, safety, task, validator
 
-All tests use mocks for LM calls — no real API keys required. The `_skill_source_env` autouse fixture (in tests that touch `EvolutionConfig`) sets `SKILL_SOURCES_HERMES_REPO` to a `tmp_path` fake repo so discovery doesn't pick up the developer's real `~/.hermes` install. Closed-loop tests use a `FakeCache` that maps `(candidate_text, task_id) → bool` directly, bypassing the validator — and `dspy.utils.DummyLM` for any LM the adapter would otherwise invoke.
+All tests use mocks for LM calls — no real API keys required. Central fixtures
+isolate provider configuration and authentication loading, while source discovery
+uses synthetic roots. A developer's Hermes configuration cannot select a live
+provider; no global `Path.home()` patch is required. Closed-loop tests use fake
+caches and `dspy.utils.DummyLM` without launching real agents. Long verification
+runs use detached execution with private logs and exit-status artifacts; every
+manual tmux command specifies its private socket.
 
 ## Workflow 9: Evolve a tool description (deploy path)
 
@@ -524,7 +547,7 @@ Per-task scores are deterministic over candidate text (cache is keyed by `sha256
 
 `evolve_skill` exposes the same `--closed-loop-*` flags. Two differences from the tool path:
 
-- **Verdict mechanism is `test_command`, not tool-call membership.** Skill-side suites set `"test_command": "python test_solution.py"` on each task; the validator runs that command in `fixture_dir` after the agent and passes iff exit code is zero. `expected_tools` / `forbidden_tools` aren't meaningful for "did the agent debug correctly"-shape verdicts. The decision rule (two-condition: aggregate no-regression + per-task wins offset losses 2:1) is unchanged.
+- **Diagnostic verdict mechanism is `test_command`, not tool-call membership.** Skill-side suites set `"test_command": "python test_solution.py"` on each task; the validator runs that command in `fixture_dir` after the agent, and the implemented scorer treats exit zero as a diagnostic pass. This does not establish deployment eligibility. The proposed contract additionally requires trusted execution and coverage, containment, certified cleanup, checked scope, and independent verification; cooperative pytest evidence alone leaves deployment blocked. The diagnostic decision rule (aggregate no-regression + per-task wins offset losses 2:1) is unchanged.
 - **`SkillFileInstaller` instead of in-place tool description splice.** The user's actual skill may live in a read-only plugin cache, so the installer copies the baseline skill directory into a writable workdir at construction and mutates the copy. `HermesAgentRunner._prime_sandbox` reads `TaskRunContext.skills_src` and copies that workdir's `skills/` into each per-task sandbox so `hermes -z` discovers the candidate. The user's source skill is never touched.
 
 Default `--closed-loop-mode` is `feedback` (not `trainset`) on the skill side. Skill bodies mutate heavily, so the `gate_mode="always"` that trainset needs would fire the validator on every novel candidate — N tasks × 2 phases per fire. Opt into `trainset` / `both` explicitly when the cost is acceptable.
@@ -608,6 +631,11 @@ sequenceDiagram
 ```
 
 The `closed_loop_scorer` is the spine of behavioral scoring: `score(task_id, candidate_text)` splices the candidate into the live `prompt_builder.py` **only when it changes** (consecutive tasks for the same candidate reuse the live splice), runs the task via `hermes -z`, and reads the session back from the sandbox `state.db`. The splice+run is serialized under one `threading.Lock` because `dspy.Evaluate` scores with a thread pool but the spliced file is a single shared mutable resource — behavioral scoring is therefore effectively serial, an accepted v1 cost. The explicit `dspy.configure` is load-bearing: `dspy.context` inside the saturation pre-flight does **not** propagate into GEPA's worker threads, so without the global LM the passthrough predictor raises "No LM is loaded" → no trajectories → no proposal.
+
+Reusing a splice or cached verdict still verifies the installed artifact before
+each task. Parsing offsets and writing a prompt use a single byte snapshot.
+Feedback updates are synchronized without recursive-lock deadlocks, and aborts
+preserve a decision and available partial progress before propagating the error.
 
 ### Phase C — Inside the guard: saturation pre-flight, then GEPA
 
@@ -712,7 +740,13 @@ both Hermes and Claude prompt backends.
 The `--target claude` analog of Workflow 12. Same purely-behavioral shape — seed a region → GEPA with per-candidate injection → behavioral scoring → closed-loop deploy gate → `--apply` — but against `claude -p` instead of `hermes -z`. The agnostic core (GEPA, `ClosedLoopValidator`, `score_task`) is shared; the backend is three adapters (`ClaudeCodeAgentRunner`, `ClaudeCodePromptSource`, `ClaudeAppendPromptInstaller`). Three structural contrasts with the Hermes prompt path:
 
 - **The evolved section is a CLAUDE.md region**, delimited by `<!-- evolve:NAME start -->` … `<!-- evolve:NAME end -->`, not a `prompt_builder.py` constant. The seed region is read via `ClaudeCodePromptSource.read`.
-- **Validation never touches the user's CLAUDE.md.** Each candidate is written to a throwaway `append_system_prompt.txt` (`ClaudeAppendPromptInstaller`) that `claude -p` reads via `--append-system-prompt-file`. The agent also runs hermetically — fresh tmp `HOME` (no ambient `~/.claude` config), an OS `sandbox` confining writes to the fixture dir, `--strict-mcp-config`, `--no-session-persistence`. The real CLAUDE.md is read once (to seed) and written once (on `--apply`); never during scoring.
+- **Validation never touches the user's CLAUDE.md.** Each candidate is written to
+  a throwaway `append_system_prompt.txt` (`ClaudeAppendPromptInstaller`) that
+  `claude -p` reads via `--append-system-prompt-file`. A private `HOME`, allowlisted
+  environment, `--strict-mcp-config`, and `--no-session-persistence` accompany
+  capability-tested OS containment. Unavailable required capabilities cause
+  refusal. The real CLAUDE.md seeds the candidate and is written only on `--apply`,
+  never during scoring.
 - **The verdict is convention adherence**, not memory-content judging. A task is `expected_action:"convention"`: pass iff a `Bash` call used the repo wrapper (`required_cmd_substr`) and none bypassed it with the default tool (`forbidden_cmd_substr`). No LLM judge.
 
 ```bash
@@ -768,12 +802,20 @@ The runner records each `claude -p` invocation's `total_cost_usd` against the sh
 The non-GEPA path. Instead of evolving artifact *text* scored by a judge, this repairs tool *code* from a failing test, scored by an **executable oracle**. The data flow is harvest (or a hand-supplied tool + tests) → throwaway worktree → repair loop → code deploy gate. The repair never touches the user's checkout (it mutates a detached worktree with an isolated editable venv, guarded by an authoritative-import check) and the gate resists the specific ways a green test lies (surface freeze, file scope, a held-out split the proposer never saw, a baseline-diff regression floor).
 
 ```bash
-python -m evolution.code.evolve_code \
-    --repo ~/.hermes/hermes-agent \
-    --tool tools/foo.py \
-    --visible-test tests/tools/test_foo_a.py \
-    --holdout-test tests/tools/test_foo_b.py
+uv run --no-sync python -m evolution.code.evolve_code --help
 ```
+
+This prints repair options without executing a repair. For an authorized run,
+select the approved repository, tool, visible test, and held-out test using the
+[repair CLI reference](interfaces.md).
+**Proposed refinement:** repository setup, imports, tests, and benchmarks must use
+the same execution policy. Deployment also requires trusted selection and
+[independent verification](reference/execution-contracts.md#independent-verification-and-eligible-execution).
+No supported adapter implements the eligible path yet; cooperative pytest records
+leave deployment blocked under the contract. The recovered gate can still emit
+`deploy`; the diagram below shows its legacy comparison flow, not an eligible
+deployment flow. The future gate must validate verifier and supervisor evidence
+before comparison success can authorize delivery or PR automation.
 
 ```mermaid
 sequenceDiagram
@@ -804,8 +846,9 @@ sequenceDiagram
     CLI->>G: run_code_gate(env, tool, visible, holdout, floor_paths)
     G->>W: freeze → file scope → run_test(holdout) → regression floor (repaired vs base)
     Note over G,W: recheck file scope immediately after each test subprocess
-    G-->>CLI: CodeGateResult(deploy | reject)
-    alt deploy
+    G-->>CLI: CodeGateResult(deploy | reject) — legacy comparison only
+    Note over G,CLI: cooperative pytest evidence is deployment-ineligible under proposed contract
+    alt legacy deploy result
         CLI->>CLI: write gate_decision.json + repair_trace.json (+ optional draft PR)
     end
 ```
