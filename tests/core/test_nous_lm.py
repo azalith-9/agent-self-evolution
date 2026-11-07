@@ -406,14 +406,14 @@ class TestAsyncPath:
 
             with patch.object(NousLM, "_ensure_credentials") as mock_ensure, \
                  patch("dspy.LM.aforward", autospec=True) as mock_super_aforward:
-                mock_super_aforward.return_value = asyncio.sleep(0, result="ok")
+                mock_super_aforward.return_value = "ok"
 
-                asyncio.run(
+                assert asyncio.run(
                     lm.aforward(messages=[{"role": "user", "content": "hi"}])
-                )
+                ) == "ok"
 
                 mock_ensure.assert_called_once()
-                mock_super_aforward.assert_called_once()
+                mock_super_aforward.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

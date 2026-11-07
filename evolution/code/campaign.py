@@ -191,7 +191,7 @@ def run_campaign(
         )
 
         rlm = resolve_default_lm(role="optimizer", explicit_model=proposer_model)
-        lm = dspy.LM(rlm.model, **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
+        lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
         dspy.configure(callbacks=[LMTimingCallback()])
         # Record per-call usage/cost into COST_LEDGER and surface auth aborts —
         # without these the dspy timing callback fires but no cost accrues, so the

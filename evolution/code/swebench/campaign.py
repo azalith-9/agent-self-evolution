@@ -62,7 +62,7 @@ def build_swebench_runner(*, seeds: int, max_rounds: int, proposer_model: Option
     import dspy  # noqa: PLC0415
     _arm_cost_ledger(max_cost_usd)
     rlm = resolve_default_lm(role="optimizer", explicit_model=proposer_model)
-    lm = dspy.LM(rlm.model, **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
+    lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
     engine = RepairEngine(build_dspy_proposer(lm), max_rounds=max_rounds)
 
     def runner(c: _Cand):

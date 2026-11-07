@@ -359,7 +359,7 @@ def adjudicate_main():
         from evolution.code.campaign import PROPOSER_MAX_TOKENS
 
         rlm = resolve_default_lm(role="optimizer")
-        lm = dspy.LM(rlm.model, **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
+        lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
         dspy.configure(callbacks=[LMTimingCallback()])
         register_litellm_cost_callback()
         register_litellm_failure_callback()
@@ -522,7 +522,7 @@ def main():
         from evolution.code.campaign import PROPOSER_MAX_TOKENS
         from evolution.code.worktree import WorktreeEnv
         rlm = resolve_default_lm(role="optimizer")
-        lm = dspy.LM(rlm.model, **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
+        lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
         dspy.configure(callbacks=[LMTimingCallback()])
         register_litellm_cost_callback()
         register_litellm_failure_callback()

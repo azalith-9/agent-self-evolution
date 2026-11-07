@@ -8,21 +8,16 @@ version = "0.1.0"
 description = "Evolutionary self-improvement for agent skills — optimize skills, prompts, tool descriptions, and code using DSPy + GEPA"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 authors = [
     {name = "jramos"},
 ]
 keywords = ["llm", "optimization", "evolution", "dspy", "gepa", "agent", "skill"]
 
 dependencies = [
-    "dspy[litellm]>=3.2.0,<3.3",
-    # Pinned to PR-304 merge SHA for the acceptance_criterion API; swap to
-    # a PyPI version when 0.1.2 ships (latest released 0.1.1 predates the merge).
-    "gepa @ git+https://github.com/gepa-ai/gepa.git@5e24ee5c8e1857a62a1ba19731de9da45ffb6f1b",
-    # Pinned because lm_timing_callback.py uses litellm.failure_callback
-    # (a module-level list mutation API) and dspy.LM forwards
-    # request_timeout/num_retries to litellm. Both are stable at 1.82
-    # but not marked as public, so a future minor bump could move them.
+    "dspy[litellm]>=3.4.1,<3.5",
+    "gepa==0.1.4",
+    # Cost/failure observability uses LiteLLM's module-level callback lists.
     "litellm>=1.82.0,<2.0",
     "openai>=1.0.0",
     "click>=8.0",
@@ -37,7 +32,7 @@ dependencies = [
 
 [project.optional-dependencies]
 miprov2 = [
-    "dspy[optuna]>=3.2.0,<3.3",
+    "dspy[optuna]>=3.4.1,<3.5",
 ]
 swebench = [
     "datasets>=2.0",
@@ -56,13 +51,6 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/jramos/agent-self-evolution"
 Repository = "https://github.com/jramos/agent-self-evolution"
-
-[tool.uv]
-# DSPy 3.2.0 hard-pins gepa[dspy]==0.0.27; override to take PR-304's
-# acceptance_criterion API before 0.1.2 ships on PyPI.
-override-dependencies = [
-    "gepa @ git+https://github.com/gepa-ai/gepa.git@5e24ee5c8e1857a62a1ba19731de9da45ffb6f1b",
-]
 
 [tool.setuptools.packages.find]
 include = ["evolution*"]

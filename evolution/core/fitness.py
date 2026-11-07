@@ -91,7 +91,7 @@ class LLMJudge:
         # request_timeout=60 ≈ 6x P99 of the slowest observed gpt-4.1-mini
         # call. TimeoutError after retries propagates to GEPA's fallback path.
         _lm = self.config.get_lm("eval")
-        lm = dspy.LM(_lm.model, **_lm.lm_kwargs, temperature=0.0, max_tokens=4000, request_timeout=60, num_retries=5)
+        lm = dspy.LM(_lm.model, engine="litellm", **_lm.lm_kwargs, temperature=0.0, max_tokens=4000, request_timeout=60, num_retries=5)
 
         with dspy.context(lm=lm):
             result = self.judge(

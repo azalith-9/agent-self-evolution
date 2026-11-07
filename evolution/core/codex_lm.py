@@ -126,6 +126,7 @@ class CodexLM(dspy.LM):
         kwargs["api_base"] = base_url
         kwargs["api_key"] = access_token
         kwargs["extra_headers"] = codex_cloudflare_headers(access_token)
+        kwargs["engine"] = "litellm"
 
         super().__init__(model=model, model_type="responses", **kwargs)
 

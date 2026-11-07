@@ -17,6 +17,7 @@ Three surfaces:
 2. `register_litellm_failure_callback()` — installs `_log_litellm_failure`
    into `litellm.failure_callback` so each retry attempt is logged
    (BaseCallback only fires once per logical call, hiding retries).
+   An async counterpart handles LiteLLM's separate async failure hook.
    Idempotent + lock-guarded against TOCTOU on concurrent imports.
 3. `CostLedger` + `register_litellm_cost_callback()` — installs a
    success-callback into `litellm.success_callback` that captures
@@ -26,6 +27,7 @@ Three surfaces:
    OpenAI's cache_read_input_token_cost. The DSPy `on_lm_end` callback
    can NOT see the raw response (DSPy parses it to a list of strings
    before the callback fires), so this hooks litellm directly instead.
+   Sync and async callbacks feed the same ledger and next-call abort guards.
 """
 
 from __future__ import annotations
@@ -188,8 +190,14 @@ def _log_litellm_failure(kwargs, exception, start_time, end_time) -> None:
 _register_lock = threading.Lock()
 
 
+async def _alog_litellm_failure(
+    kwargs: dict[str, Any], exception: Any, start_time: Any, end_time: Any,
+) -> None:
+    _log_litellm_failure(kwargs, exception, start_time, end_time)
+
+
 def register_litellm_failure_callback() -> None:
-    """Install `_log_litellm_failure` into `litellm.failure_callback`,
+    """Install sync and async LiteLLM failure callbacks,
     idempotently. Lock-guarded against TOCTOU on concurrent first-call
     (the dedup check + append must be atomic).
 
@@ -201,6 +209,9 @@ def register_litellm_failure_callback() -> None:
         callbacks = litellm.failure_callback or []
         if _log_litellm_failure not in callbacks:
             litellm.failure_callback = callbacks + [_log_litellm_failure]
+        async_callbacks = litellm._async_failure_callback or []
+        if _alog_litellm_failure not in async_callbacks:
+            litellm._async_failure_callback = async_callbacks + [_alog_litellm_failure]
 
 
 @dataclass
@@ -440,8 +451,14 @@ def _log_litellm_cost(
     )
 
 
+async def _alog_litellm_cost(
+    kwargs: dict[str, Any], completion_response: Any, start_time: Any, end_time: Any,
+) -> None:
+    _log_litellm_cost(kwargs, completion_response, start_time, end_time)
+
+
 def register_litellm_cost_callback() -> None:
-    """Install `_log_litellm_cost` into `litellm.success_callback`,
+    """Install sync and async LiteLLM cost callbacks,
     idempotently. Lock-guarded against TOCTOU on concurrent first-call.
 
     Call this once per `evolve()` invocation alongside
@@ -453,37 +470,51 @@ def register_litellm_cost_callback() -> None:
         callbacks = litellm.success_callback or []
         if _log_litellm_cost not in callbacks:
             litellm.success_callback = callbacks + [_log_litellm_cost]
+        async_callbacks = litellm._async_success_callback or []
+        if _alog_litellm_cost not in async_callbacks:
+            litellm._async_success_callback = async_callbacks + [_alog_litellm_cost]
+
+
+def _raise_if_lm_aborted() -> None:
+    state = COST_LEDGER.get_abort_state()
+    if state is not None:
+        raise CostCeilingExceeded(*state)
+    auth_msg = COST_LEDGER.get_auth_abort_message()
+    if auth_msg is not None:
+        from evolution.core.hermes_provider import HermesProviderError
+        raise HermesProviderError(auth_msg)
+
 
 def _install_cost_ceiling_lm_guard() -> None:
-    """Patch ``BaseLM.__call__`` to raise ``CostCeilingExceeded`` when the
-    ledger has flagged an abort. Callbacks can't raise — DSPy and litellm
+    """Guard ``BaseLM.__call__`` and ``acall`` against pending ledger aborts.
+
+    Callbacks can't raise — DSPy and litellm
     both swallow callback exceptions — so the check has to live in the
     call path itself. Idempotent.
     """
     from dspy.clients.base_lm import BaseLM
 
-    if getattr(BaseLM.__call__, "_cost_ceiling_guarded", False):
-        return
+    if not getattr(BaseLM.__call__, "_cost_ceiling_guarded", False):
+        original_call = BaseLM.__call__
 
-    original_call = BaseLM.__call__
+        @functools.wraps(original_call)
+        def call_with_cost_ceiling_check(self: Any, *args: Any, **kwargs: Any) -> Any:
+            _raise_if_lm_aborted()
+            return original_call(self, *args, **kwargs)
 
-    @functools.wraps(original_call)
-    def call_with_cost_ceiling_check(self, *args, **kwargs):
-        state = COST_LEDGER.get_abort_state()
-        if state is not None:
-            raise CostCeilingExceeded(*state)
-        # Mid-run auth-abort: HermesProviderError is BaseException-derived
-        # so dspy.Evaluate's `except Exception` cannot swallow it — the
-        # abort propagates out of the worker pool to the top-level CLI
-        # catch.
-        auth_msg = COST_LEDGER.get_auth_abort_message()
-        if auth_msg is not None:
-            from evolution.core.hermes_provider import HermesProviderError
-            raise HermesProviderError(auth_msg)
-        return original_call(self, *args, **kwargs)
+        call_with_cost_ceiling_check._cost_ceiling_guarded = True  # type: ignore[attr-defined]
+        BaseLM.__call__ = call_with_cost_ceiling_check
 
-    call_with_cost_ceiling_check._cost_ceiling_guarded = True  # type: ignore[attr-defined]
-    BaseLM.__call__ = call_with_cost_ceiling_check
+    if not getattr(BaseLM.acall, "_cost_ceiling_guarded", False):
+        original_acall = BaseLM.acall
+
+        @functools.wraps(original_acall)
+        async def acall_with_cost_ceiling_check(self: Any, *args: Any, **kwargs: Any) -> Any:
+            _raise_if_lm_aborted()
+            return await original_acall(self, *args, **kwargs)
+
+        acall_with_cost_ceiling_check._cost_ceiling_guarded = True  # type: ignore[attr-defined]
+        BaseLM.acall = acall_with_cost_ceiling_check
 
 
 _install_cost_ceiling_lm_guard()

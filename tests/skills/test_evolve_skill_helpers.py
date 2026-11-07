@@ -7,6 +7,7 @@ ImportError install-hint chaining) can be unit-tested without an LM.
 
 import dspy
 import pytest
+from dspy.utils.exceptions import LMTimeoutError
 
 from evolution.skills.budget_aware_proposer import BudgetAwareProposer
 from evolution.skills.evolve_skill import (
@@ -94,6 +95,21 @@ class TestBuildOptimizerAndCompile:
         )
         assert isinstance(result, _FakeOptimized)
         assert name == "MIPROv2"
+
+    def test_dspy_timeout_falls_back_and_preserves_diagnostic(self, tmp_path):
+        def timeout(**kwargs):
+            raise LMTimeoutError("reflection timed out", model="openai/test")
+
+        log = tmp_path / "gepa_failure.log"
+        result, name = _build_optimizer_and_compile(
+            **self._common_kwargs(failure_log_path=log),
+            _gepa_runner=timeout,
+            _mipro_runner=_mipro_runner_succeeds,
+        )
+        assert isinstance(result, _FakeOptimized)
+        assert name == "MIPROv2"
+        assert "LMTimeoutError" in log.read_text()
+        assert "reflection timed out" in log.read_text()
 
     def test_no_fallback_reraises_gepa_failure(self):
         with pytest.raises(RuntimeError, match="simulated GEPA failure"):

@@ -37,6 +37,7 @@ from typing import Any, Dict, Optional
 import dspy
 import httpx
 import litellm
+from dspy.utils.exceptions import LMAuthError
 
 from evolution.core.hermes_provider import HermesProviderError
 from evolution.core.oauth_helpers import parse_iso_or_epoch
@@ -179,6 +180,7 @@ class NousLM(dspy.LM):
 
         kwargs["api_base"] = effective_inference
         kwargs["api_key"] = agent_key or ""
+        kwargs["engine"] = "litellm"
 
         super().__init__(model=model, **kwargs)
 
@@ -455,7 +457,7 @@ class NousLM(dspy.LM):
         self._ensure_credentials()
         try:
             return super().forward(prompt=prompt, messages=messages, **kwargs)
-        except litellm.AuthenticationError:
+        except (litellm.AuthenticationError, LMAuthError):
             # Cached agent_key is dead despite passing the skew check.
             # Force re-mint (which may also refresh OAuth on its own 401)
             # and retry once. If the freshly-minted key is also rejected
@@ -465,7 +467,7 @@ class NousLM(dspy.LM):
             self._force_remint()
             try:
                 return super().forward(prompt=prompt, messages=messages, **kwargs)
-            except litellm.AuthenticationError as exc:
+            except (litellm.AuthenticationError, LMAuthError) as exc:
                 raise HermesProviderError(
                     "Nous Portal inference rejected a freshly-minted "
                     "agent_key after an automatic re-mint. The OAuth "
@@ -477,13 +479,13 @@ class NousLM(dspy.LM):
         self._ensure_credentials()
         try:
             return await super().aforward(prompt=prompt, messages=messages, **kwargs)
-        except litellm.AuthenticationError:
+        except (litellm.AuthenticationError, LMAuthError):
             self._force_remint()
             try:
                 return await super().aforward(
                     prompt=prompt, messages=messages, **kwargs
                 )
-            except litellm.AuthenticationError as exc:
+            except (litellm.AuthenticationError, LMAuthError) as exc:
                 raise HermesProviderError(
                     "Nous Portal inference rejected a freshly-minted "
                     "agent_key after an automatic re-mint. The OAuth "

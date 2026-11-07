@@ -51,6 +51,28 @@ def test_build_lineage_none_without_parents():
     ) is None
 
 
+def test_mapping_subscores_persist_values_in_validation_order():
+    details = _details(
+        texts=["seed", "v1"], parents=[None, [0]], val_agg=[0.4, 0.7],
+        val_sub=[{1: 0.6, 0: 0.2}, {1: 0.8, 0: 0.6}], best_idx=1,
+    )
+    lin = build_lineage(
+        details, extract_text=_extract, deployed_idx=1,
+        selection={}, seed_text="seed", live_baseline_text="seed",
+    )
+    assert lin["candidates"][0]["val_subscores"] == [0.2, 0.6]
+    assert lin["candidates"][1]["val_subscores"] == [0.6, 0.8]
+
+
+def test_empty_mapping_subscores_stay_empty():
+    details = _details(["seed"], [None], [0.0], val_sub=[{}])
+    lin = build_lineage(
+        details, extract_text=_extract, deployed_idx=0,
+        selection={}, seed_text="seed", live_baseline_text="seed",
+    )
+    assert lin["candidates"][0]["val_subscores"] == []
+
+
 def test_extractor_failure_degrades_to_none_text():
     details = _details(["a"], [None], [0.5], best_idx=0)
     def boom(_c):

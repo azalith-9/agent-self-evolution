@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import litellm
 import pytest
+from dspy.utils.exceptions import LMAuthError, LMRateLimitError
 
 from evolution.core.auth_check import (
     HermesProviderRateLimitError,
@@ -61,6 +62,11 @@ def _rate_err(model: str = "openai/gpt-4o-mini") -> litellm.RateLimitError:
 
 
 class TestIsAuthError:
+    def test_dspy_auth_error_without_status_in_message(self):
+        exc = LMAuthError("rejected", status=401)
+        assert is_auth_error(exc)
+        assert not is_rate_limit_error(exc)
+
     def test_litellm_authentication_error(self):
         assert is_auth_error(_auth_err())
 
@@ -85,6 +91,11 @@ class TestIsAuthError:
 
 
 class TestIsRateLimitError:
+    def test_dspy_rate_limit_without_status_in_message(self):
+        exc = LMRateLimitError("busy", status=429)
+        assert is_rate_limit_error(exc)
+        assert not is_auth_error(exc)
+
     def test_litellm_rate_limit(self):
         assert is_rate_limit_error(_rate_err())
 

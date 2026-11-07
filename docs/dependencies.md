@@ -2,13 +2,14 @@
 
 External packages the framework depends on, what each is used for, and how they're constrained.
 
-Last verified against `pyproject.toml` + `uv.lock` on 2026-05-25.
+The supported Python range is `>=3.10,<3.15`, matching GEPA’s Python constraint.
+Use `uv sync` for the versions recorded in `uv.lock`.
 
 ## Hard runtime dependencies
 
-### `dspy>=3.2.0,<3.3`
+### `dspy[litellm]>=3.4.1,<3.5`
 
-The optimization engine. DSPy 3.2.0 is the floor; in practice the lock pins it at 3.2.0 because that's the version whose `gepa[dspy]==0.0.27` transitive constraint is what forced the gepa override below. Used pervasively:
+The optimization engine. The lock pins DSPy 3.4.1 with its LiteLLM extra. All framework LM constructors explicitly select `engine="litellm"` so OAuth adapters and LiteLLM cost/failure callbacks keep their existing execution path. Used pervasively:
 
 | Module | Usage |
 |---|---|
@@ -17,7 +18,7 @@ The optimization engine. DSPy 3.2.0 is the floor; in practice the lock pins it a
 | `dspy.ChainOfThought`, `dspy.Predict` | Wrapped predictors. |
 | `dspy.Example` | Train/val/holdout examples (via `EvalDataset.to_dspy_examples`). |
 | `dspy.Prediction` | Metric return type (`score`, `feedback`). |
-| `dspy.LM` | All LM calls. `request_timeout` and `num_retries` kwargs are forwarded to litellm. |
+| `dspy.LM` | All LM calls use the LiteLLM engine. `request_timeout` reaches LiteLLM; DSPy owns bounded retries via `num_retries`. |
 | `dspy.configure` | Sets the global LM + callbacks. |
 | `dspy.context(lm=...)` | Per-block LM override (used in dataset gen, judge, relevance scoring). |
 | `dspy.GEPA` | The reflective optimizer. `track_stats=True` for `detailed_results`; `instruction_proposer=` for `BudgetAwareProposer`. |
@@ -25,32 +26,40 @@ The optimization engine. DSPy 3.2.0 is the floor; in practice the lock pins it a
 | `dspy.Evaluate` | Holdout scoring with `num_threads=4`. |
 | `dspy.utils.callback.BaseCallback` | Subclassed by `LMTimingCallback`. **Internal-ish API.** |
 
-**Why pinned to `<3.3`:** `BaseCallback` lives at `dspy.utils.callback.BaseCallback` and is not in `dspy.__all__`. A 3.3 minor bump could move or rename it. Same for the `DspyAdapter` / `propose_new_texts` interaction in `gepa/api.py:317-321` that forces our use of `instruction_proposer` instead of `reflection_prompt_template`.
+**Why bounded below 3.5:** the custom Codex and Nous LMs still use the
+`forward` / `aforward` subclass interface, which DSPy supports throughout 3.4
+and schedules for removal in 3.5. Migrating those adapters to the normalized
+engine API is separate work. Authentication handling recognizes DSPy's typed
+`LMAuthError` and `LMRateLimitError` as well as LiteLLM errors. Reflection
+`request_timeout` and `num_retries` remain explicit at construction.
 
-### `gepa @ git+https://github.com/gepa-ai/gepa.git@5e24ee5c8e1857a62a1ba19731de9da45ffb6f1b`
+GEPA's `DspyGEPAResult.val_subscores` contains mappings keyed by validation
+example ID. Lineage persistence orders scores by example ID and writes the
+existing JSON score-list shape. Custom instruction proposers, sentinel guards,
+and the framework's candidate selection and deployment gates remain in use.
 
-GEPA itself is pinned to an exact git SHA — the merge commit for the upstream `acceptance_criterion` API. The framework's `--gepa-acceptance` flag forwards `acceptance_criterion="improvement_or_equal"` to `dspy.GEPA(..., gepa_kwargs={...})`; the latest released `gepa==0.1.1` on PyPI predates that merge and doesn't accept the kwarg.
+### `gepa==0.1.4`
 
-**Why a git pin instead of a version range:** the version that ships with the merged API (`0.1.2`) hadn't been published at the time the framework adopted it. When `0.1.2` (or newer) lands on PyPI, swap the dep to `gepa>=0.1.2,<0.2` and drop the `[tool.uv]` override below.
-
-**`[tool.uv] override-dependencies`:** DSPy 3.2.0 hard-pins `gepa[dspy]==0.0.27` as a transitive constraint. Without the override, `uv sync` would resolve to that pre-`acceptance_criterion` build and the `improvement-or-equal` default would error at GEPA construction time. The override block forces every resolver path — direct dep, transitive via `dspy[optuna]`, transitive via anything else — onto the same git SHA:
-
-```toml
-[tool.uv]
-override-dependencies = [
-    "gepa @ git+https://github.com/gepa-ai/gepa.git@5e24ee5c8e1857a62a1ba19731de9da45ffb6f1b",
-]
-```
-
-This is uv-specific (PEP 735 doesn't standardize overrides). Users installing with pip pick up the direct git dep but not the override — if they also install `dspy[optuna]`, pip's resolver will report a conflict. `uv sync` is the supported install path.
+The released optimizer used by DSPy 3.4.1. Both dependencies resolve from PyPI
+without a Git dependency or uv override. GEPA 0.1.4 includes the
+`acceptance_criterion` API: the framework forwards its `--gepa-acceptance`
+selection through `dspy.GEPA(..., gepa_kwargs={...})`, defaulting to
+`"improvement_or_equal"`. The optional `miprov2` extra resolves alongside the
+same DSPy and GEPA versions.
 
 ### `litellm>=1.82.0,<2.0`
 
-The provider-agnostic LLM client that DSPy wraps. Used directly only in `evolution/core/lm_timing_callback.py`:
+The provider-agnostic LLM client used by DSPy, credential preflight, and cost metering. Observability hooks live in `evolution/core/lm_timing_callback.py`:
 
-- `litellm.failure_callback` — module-level list mutation (not a documented public API). The framework registers `_log_litellm_failure` here so per-attempt retries are visible (DSPy's `BaseCallback.on_lm_end` only fires once per logical call).
+- `litellm.success_callback` and `litellm.failure_callback` record synchronous costs and failures.
+- `litellm._async_success_callback` and `litellm._async_failure_callback` register coroutine equivalents for asynchronous calls; LiteLLM does not invoke synchronous function callbacks for those calls.
+- The `BaseLM.__call__` and `BaseLM.acall` guards check the same ledger before each request, enforcing pending cost and authentication aborts in both paths.
 
-**Why pinned:** `failure_callback` is stable at 1.82 but not marked public. A future minor bump could move or change its protocol. The pin protects observability without rolling our own retry layer.
+Registration is idempotent and lock-guarded. Offline integration tests use real
+DSPy/LiteLLM execution with mocked responses to verify token accounting, one
+cost record per call, and the next-call cost ceiling in sync and async modes.
+
+**Why bounded below 2.0:** module-level callback lists include private async hooks. Their protocol is covered by integration tests and must be revalidated when upgrading LiteLLM. The lock currently uses 1.82.6.
 
 ### `openai>=1.0.0`
 
@@ -59,7 +68,7 @@ The OpenAI SDK that litellm uses for `openai/*` model strings. Default models in
 - `eval_model` default: `openai/gpt-4.1-mini`
 - `reflection_model` CLI default: `openai/gpt-5-mini`
 
-Note: OpenAI's `_base_client` adds its own retry layer underneath litellm's tenacity layer. Visible as `openai._base_client: Retrying request` in `run.log`. This means `request_timeout × num_retries` is a bound, not a hard ceiling — observed worst case has been ~910s vs claimed 600s.
+DSPy manages retries and invokes the LiteLLM engine with its own retries disabled. `request_timeout` is a per-attempt timeout, so a retry budget does not imply a hard wall-clock ceiling for an entire optimization.
 
 Models can be swapped to any provider litellm supports (Anthropic, OpenRouter, Together, etc.) via `--optimizer-model anthropic/claude-3-5-sonnet-20241022` etc. — no code changes required.
 
@@ -99,7 +108,7 @@ Declared under `[dependency-groups].dev` (PEP 735), so it stays out of the publi
 
 ## Optional extras
 
-### `[miprov2]` — `dspy[optuna]>=3.2.0,<3.3`
+### `[miprov2]` — `dspy[optuna]>=3.4.1,<3.5`
 
 Required only when GEPA fails and the MIPROv2 fallback fires. The import is lazy inside `_default_mipro_runner()` — install on demand:
 

@@ -377,7 +377,7 @@ class TestCodexAsyncPath:
     def test_aforward_invokes_refresh_before_super(self):
         with patch.object(CodexLM, "_refresh_if_expiring") as mock_refresh, \
              patch("dspy.LM.aforward", autospec=True) as mock_super_aforward:
-            mock_super_aforward.return_value = asyncio.sleep(0, result="ok")
+            mock_super_aforward.return_value = "ok"
             lm = CodexLM(
                 model="gpt-5-codex",
                 access_token=_jwt_with_account("acct-1"),
@@ -385,10 +385,10 @@ class TestCodexAsyncPath:
                 expires_at=time.time() + 3600,
             )
 
-            asyncio.run(lm.aforward(messages=[{"role": "user", "content": "hi"}]))
+            assert asyncio.run(lm.aforward(messages=[{"role": "user", "content": "hi"}])) == "ok"
 
             mock_refresh.assert_called_once()
-            mock_super_aforward.assert_called_once()
+            mock_super_aforward.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

@@ -214,7 +214,7 @@ class SyntheticDatasetBuilder:
         # max_tokens=16000 because at eval_dataset_size=60 the JSON output
         # truncates mid-string at 4000, producing JSONDecodeError → process exit.
         _lm = self.config.get_lm("judge")
-        lm = dspy.LM(_lm.model, **_lm.lm_kwargs, temperature=0.7, max_tokens=16000, request_timeout=120, num_retries=5)
+        lm = dspy.LM(_lm.model, engine="litellm", **_lm.lm_kwargs, temperature=0.7, max_tokens=16000, request_timeout=120, num_retries=5)
 
         with dspy.context(lm=lm):
             result = self.generator(
@@ -418,7 +418,7 @@ class SyntheticDatasetBuilder:
 
         _lm = self.config.get_lm("judge")
         lm = dspy.LM(
-            _lm.model,
+            _lm.model, engine="litellm",
             **_lm.lm_kwargs,
             temperature=0.7,
             max_tokens=16000,

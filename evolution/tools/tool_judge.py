@@ -87,7 +87,7 @@ class ToolJudge:
 
         _lm = self.config.get_lm("eval")
         lm = dspy.LM(
-            _lm.model,
+            _lm.model, engine="litellm",
             **_lm.lm_kwargs,
             temperature=0.0,
             max_tokens=4000,

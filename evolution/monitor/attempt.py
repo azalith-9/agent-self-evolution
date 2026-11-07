@@ -33,7 +33,7 @@ def _build_runner(*, proposer_model, base_python, seeds, max_rounds, max_cost_us
     )
 
     rlm = resolve_default_lm(role="optimizer", explicit_model=proposer_model)
-    lm = dspy.LM(rlm.model, **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
+    lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
     dspy.configure(callbacks=[LMTimingCallback()])
     register_litellm_cost_callback()
     register_litellm_failure_callback()

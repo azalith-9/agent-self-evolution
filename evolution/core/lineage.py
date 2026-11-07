@@ -17,6 +17,7 @@ Two facts a consumer must respect, baked into the schema:
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -56,12 +57,15 @@ def build_lineage(
 
     records: list[dict[str, Any]] = []
     for i, cand in enumerate(candidates):
+        subscores = val_sub[i] if val_sub and i < len(val_sub) else None
+        if isinstance(subscores, Mapping):
+            subscores = [subscores[key] for key in sorted(subscores)]
         records.append({
             "idx": i,
             "parents": parents[i] if i < len(parents) else None,
             "val_aggregate": val_agg[i] if i < len(val_agg) else None,
             "val_subscores": (
-                [float(x) for x in val_sub[i]] if val_sub and i < len(val_sub) else None
+                [float(x) for x in subscores] if subscores is not None else None
             ),
             "discovery_eval_count": (
                 int(disc[i]) if disc and i < len(disc) else None

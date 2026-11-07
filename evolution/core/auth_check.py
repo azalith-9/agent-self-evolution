@@ -24,6 +24,7 @@ import json
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import litellm
+from dspy.utils.exceptions import LMAuthError, LMRateLimitError
 
 from evolution.core.hermes_provider import (
     HermesProviderError,
@@ -145,7 +146,7 @@ def preflight(
 
 def is_auth_error(exc: BaseException) -> bool:
     """True if ``exc`` is an auth failure (typed or message-matched)."""
-    if isinstance(exc, litellm.AuthenticationError):
+    if isinstance(exc, (litellm.AuthenticationError, LMAuthError)):
         return True
     # PermissionDeniedError exists in litellm but also matches via 403 in
     # the message; handle the type explicitly for robustness against
@@ -157,7 +158,7 @@ def is_auth_error(exc: BaseException) -> bool:
 
 def is_rate_limit_error(exc: BaseException) -> bool:
     """True if ``exc`` is a rate-limit failure (typed or message-matched)."""
-    if isinstance(exc, litellm.RateLimitError):
+    if isinstance(exc, (litellm.RateLimitError, LMRateLimitError)):
         return True
     return _matches_pattern(exc, _RATE_LIMIT_PATTERNS)
 

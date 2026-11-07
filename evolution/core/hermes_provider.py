@@ -385,7 +385,7 @@ def instantiate_lm(resolved: ResolvedLM, **role_kwargs: Any) -> Any:
 
     import dspy  # noqa: PLC0415 — lazy import to keep module load light
 
-    return dspy.LM(resolved.model, **resolved.lm_kwargs, **role_kwargs)
+    return dspy.LM(resolved.model, engine="litellm", **resolved.lm_kwargs, **role_kwargs)
 
 
 def resolved_lms_dump(
