@@ -66,7 +66,9 @@ def test_authoritative_runs_still_answer(tmp_path, label, exit_code, output, exp
     harvester classifies a candidate rather than how the gate scores one.
     """
     env = _StubEnv(tmp_path, TestRun(passed=exit_code == 0, output=output,
-                                     duration_seconds=0.1, exit_code=exit_code))
+                                     duration_seconds=0.1, exit_code=exit_code,
+                                     evidence_complete=True, cleanup_complete=True,
+                                     failures=frozenset(expected), invocation_id="test"))
 
     assert env.failing_tests("tests/test_x.py") == expected
 
@@ -82,6 +84,7 @@ def test_oracle_gate_cannot_certify_a_timed_out_run(tmp_path, monkeypatch):
 
     env = _StubEnv(tmp_path, TestRun(passed=False, output="pytest timed out after 600s",
                                      duration_seconds=600.0, exit_code=None))
+    monkeypatch.setattr(env, "changed_files", lambda: [])
     with pytest.raises(WorktreeError, match="established nothing"):
         gate_mod.run_code_oracle_gate(
             env,
@@ -143,7 +146,8 @@ class TestRegressionFloorRefusesToScoreAHang:
 
     def _staged(self, tmp_path, floor_run):
         """A gate env whose floor run is dictated, everything else healthy."""
-        healthy = TestRun(passed=True, output="1 passed", duration_seconds=0.1, exit_code=0)
+        healthy = TestRun(passed=True, output="1 passed", duration_seconds=0.1, exit_code=0, evidence_complete=True,
+                          cleanup_complete=True, failures=frozenset(), invocation_id="test")
         env = _StubEnv(tmp_path, healthy)
 
         def run_test(*paths, **k):
@@ -210,29 +214,23 @@ class TestParametrizedIdsDoNotCollapse:
         assert _parse_pytest_failures(out) == {"t.py::test_x", "t.py::test_y"}
 
 
-class TestEvidenceOutranksExitCode:
-    """Named failures are a complete statement whatever the exit code says.
+class TestCompleteEvidenceRequired:
+    """Named collection failures do not establish a complete deployment verdict."""
 
-    The first version of this fix refused every code outside (0, 1, 5), which
-    silently dropped a real bug class: a parent whose module fails to import
-    exits 2 *and names the file it could not import*. That is evidence, and
-    refusing it would have removed those candidates from the campaign's
-    population -- an unremarked change to the denominator, in the direction that
-    flatters the published rate.
-    """
-
-    def test_import_error_exit_2_is_kept(self, tmp_path):
+    def test_import_error_exit_2_is_inconclusive(self, tmp_path):
         env = _StubEnv(tmp_path, TestRun(
             passed=False,
             output="ERROR tests/test_imp.py\n!!! Interrupted: 1 error during collection !!!",
             duration_seconds=0.3, exit_code=2,
         ))
 
-        assert env.failing_tests("tests/test_imp.py") == {"tests/test_imp.py"}
+        with pytest.raises(WorktreeError, match="complete execution evidence"):
+            env.failing_tests("tests/test_imp.py")
 
     def test_clean_pass_still_returns_empty(self, tmp_path):
         env = _StubEnv(tmp_path, TestRun(passed=True, output="3 passed",
-                                         duration_seconds=0.1, exit_code=0))
+                                         duration_seconds=0.1, exit_code=0, evidence_complete=True,
+                          cleanup_complete=True, failures=frozenset(), invocation_id="test"))
 
         assert env.failing_tests("tests/test_x.py") == set()
 
@@ -256,7 +254,7 @@ class TestEvidenceOutranksExitCode:
             env.failing_tests("tests/test_x.py")
 
 
-def test_inconclusive_while_scoring_is_a_failed_seed_not_a_skip(monkeypatch, tmp_path):
+def test_inconclusive_scoring_remains_resumable(monkeypatch, tmp_path):
     """A repair that hangs the oracle scope is wrong, not unmeasurable.
 
     By that point the repair has already passed its bug tests, so the hang is its
@@ -306,8 +304,7 @@ def test_inconclusive_while_scoring_is_a_failed_seed_not_a_skip(monkeypatch, tmp
         Path("/repo"), _Candidate(), engine=_Engine(), seeds=2, base_python=None
     )
 
-    # organism retained, both seeds scored as not-deploy-reachable
-    assert getattr(result, "seeds", None) == [False, False]
+    assert result.reason == "run_inconclusive"
 
 
 def test_incomplete_floor_names_what_it_could_not_collect():
@@ -327,22 +324,12 @@ def test_incomplete_floor_names_what_it_could_not_collect():
     assert "tests/tools/test_optional.py" in hint
 
 
-def test_the_floors_are_deliberately_stricter_than_the_seam():
-    """Guards a divergence a future reader would otherwise 'fix' into a bug.
-
-    failing_tests accepts any run that named a failure. The floors demand an
-    authoritative exit, because a diff needs a *complete* failure set: one
-    uncollectable module exits 2 having run zero tests while still printing
-    "ERROR <file>", so under the seam's rule both floor halves would parse that
-    same name, the diff would be empty, and the gate would deploy on a floor that
-    executed nothing.
-    """
+def test_legacy_exit_code_alone_is_never_authoritative():
     from evolution.code.gate import _is_authoritative
 
     class _Run:
         def __init__(self, code):
             self.exit_code = code
 
-    assert _is_authoritative(_Run(0)) and _is_authoritative(_Run(1))
-    assert not _is_authoritative(_Run(2)), "exit 2 names a failure but did not finish"
-    assert not _is_authoritative(_Run(None))
+    for code in (0, 1, 2, None):
+        assert not _is_authoritative(_Run(code))

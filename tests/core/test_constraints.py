@@ -242,15 +242,15 @@ class TestNonInferiorityGate:
         assert result.passed
         assert "non-inferior" in result.message
 
-    def test_passes_at_exact_tolerance_boundary(self):
+    def test_fails_at_exact_tolerance_boundary(self):
         validator = self._validator(tolerance=0.02)
         baseline = "x" * 1000
         evolved = "x" * 800
-        # lower_bound exactly at -tolerance → boundary inclusive
+        # Non-inferiority requires a strict lower bound above the margin.
         result = validator._check_growth_with_quality_gate(
             evolved, baseline, self._bootstrap(mean=-0.01, lower=-0.02),
         )
-        assert result.passed
+        assert not result.passed
 
     def test_fails_when_lower_bound_below_tolerance(self):
         # arxiv-style: mean=-0.023, lower=-0.135, tol=0.02 → FAIL (lower < -tol)

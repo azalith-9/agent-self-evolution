@@ -32,27 +32,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from evolution.code.deployment_evidence import verify_deployment
 from evolution.code.freeze_check import DEFAULT_MIN_RETAIN_RATIO, freeze_violations
 from evolution.code.repair import RepairResult
-from evolution.code.worktree import NonAuthoritativeRunError, WorktreeEnv
+from evolution.code.worktree import NonAuthoritativeRunError, WorktreeEnv, WorktreeError, _run
 
 GATE_SCHEMA_VERSION = "1"
 DEFAULT_FLOOR_PATHS = ("tests/tools",)
 _PYTEST_NO_TESTS_COLLECTED = 5
-# The only pytest exits that state completely what failed: all-passed, ran-and-some-
-# failed, nothing-collected. Any other code (timeout None, signal death, usage,
-# internal error) means the run answered nothing — and since the failure parser
-# returns an empty set for output it cannot read, scoring one of those would record
-# "no failures" for a run that never executed.
-#
-# Deliberately stricter than WorktreeEnv.failing_tests, which accepts any run that
-# named a failure whatever its exit code. Do not "fix" the inconsistency: a *diff*
-# needs a complete failure set, not merely some evidence. One uncollectable module
-# makes pytest exit 2 having run zero tests while still printing "ERROR <file>", so
-# under the evidence rule both floor halves would parse that same single name, the
-# diff would come out empty, and the gate would deploy on a floor that executed
-# nothing — the hole this guard exists to close.
-_AUTHORITATIVE_EXITS = (0, 1, _PYTEST_NO_TESTS_COLLECTED)
 
 
 def _incomplete_hint(output: str) -> str:
@@ -73,7 +60,8 @@ def _incomplete_hint(output: str) -> str:
 
 
 def _is_authoritative(run) -> bool:
-    return run.exit_code in _AUTHORITATIVE_EXITS
+    """Compatibility helper for complete cooperative diagnostics only."""
+    return getattr(run, "diagnostic_complete", False) and not getattr(run, "skipped", ())
 
 
 class CodeGateError(RuntimeError):
@@ -92,7 +80,7 @@ class CodeGateResult:
 
 
 def _test_relnorm(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    return path.replace("\\", "/").removeprefix("./")
 
 
 def _parse_pytest_failures(output: str) -> set[str]:
@@ -155,7 +143,11 @@ def _is_test_path(path: str) -> bool:
 
 def _file_scope_violation(env: WorktreeEnv, tool_relpath: str, guards: dict) -> str | None:
     """Recheck scope after every subprocess, before altered tests can be reused."""
-    changed = [_test_relnorm(p) for p in env.changed_files()]
+    try:
+        changed = [_test_relnorm(p) for p in env.changed_files()]
+    except WorktreeError as exc:
+        guards["file_scope_ok"] = False
+        return f"file scope could not be established: {exc}"
     guards["changed_files"] = changed
     target = _test_relnorm(tool_relpath)
     offenders = [p for p in changed if p != target]
@@ -198,6 +190,8 @@ def run_code_gate(
             "rounds_used": len(repair_result.rounds),
         },
         "guards": guards,
+        "deployment_verification": verify_deployment(env, tool_relpath=tool_relpath),
+        "diagnostic_comparison": {"status": "inconclusive", "reason": "diagnostics not completed"},
         "run_inputs": run_inputs or {},
     }
 
@@ -259,75 +253,19 @@ def run_code_gate(
         return _reject("held-out test split failed — the fix does not generalize "
                        "beyond the visible test (teaching-to-the-test)")
 
-    # 5. regression floor — no NEW failures vs the pre-repair baseline. A large
-    # suite (or an isolated venv missing optional deps) routinely has unrelated
-    # pre-existing failures, so demanding absolute green would reject every
-    # repair. Diff the failing-test sets instead: run the floor on the repaired
-    # source, then on the base source, and reject only failures the repair
-    # *introduced*. (`--tb=no` + full_output keeps the FAILED summary complete
-    # and parseable.)
-    repaired_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
-    if scope_error := _file_scope_violation(env, tool_relpath, guards):
-        return _reject(scope_error)
-    if repaired_floor.exit_code == _PYTEST_NO_TESTS_COLLECTED:
-        decision["floor_output_tail"] = repaired_floor.output[-2000:]
-        return _reject(f"regression floor {list(floor_paths)} collected no tests "
-                       f"(check the --floor-path)")
-    if not _is_authoritative(repaired_floor):
-        # The floor is the longest-running step in the gate and the likeliest place
-        # to time out — which is exactly where an LLM-introduced hang lands. Scoring
-        # it would deploy on a "floor green" that never ran.
-        decision["floor_output_tail"] = repaired_floor.output[-2000:]
-        return _reject(
-            f"regression floor exited {repaired_floor.exit_code} after "
-            f"{round(repaired_floor.duration_seconds, 1)}s — it did not finish, so its "
-            f"failure set is incomplete and cannot be diffed. "
-            f"{_incomplete_hint(repaired_floor.output)}"
-        )
-    repaired_failures = _parse_pytest_failures(repaired_floor.output)
-
-    if base_src == "":
-        # Brand-new file: no baseline to diff against, so require absolute green.
-        base_failures: set[str] = set()
-        new_failures = sorted(repaired_failures)
-    else:
-        env.write_tool(tool_relpath, base_src)
-        try:
-            base_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
-        finally:
-            env.write_tool(tool_relpath, repaired)  # always restore the repair
-        if scope_error := _file_scope_violation(env, tool_relpath, guards):
-            return _reject(scope_error)
-        if not _is_authoritative(base_floor):
-            # Worse than useless in the other direction: an empty baseline makes
-            # every pre-existing failure look introduced, rejecting a correct
-            # repair and naming it as the cause.
-            decision["floor_output_tail"] = base_floor.output[-2000:]
-            return _reject(
-                f"regression floor baseline exited {base_floor.exit_code} — it did not "
-                f"finish, and without a complete baseline the diff would attribute "
-                f"pre-existing failures to the repair. "
-                f"{_incomplete_hint(base_floor.output)}"
-            )
-        base_failures = _parse_pytest_failures(base_floor.output)
-        new_failures = sorted(repaired_failures - base_failures)
-
-    guards["floor"] = {
-        "ran": list(floor_paths),
-        "new_failures": new_failures,
-        "base_failure_count": len(base_failures),
-        "repaired_failure_count": len(repaired_failures),
-        "duration_seconds": round(repaired_floor.duration_seconds, 2),
-        "is_full_suite": False,
-    }
+    try:
+        new_failures, floor_guard, tail = _baseline_diff_floor(
+            env, tool_relpath, repaired, base_src, floor_paths, guards)
+    except (CodeGateError, NonAuthoritativeRunError) as exc:
+        return _reject(str(exc))
+    guards["floor"] = floor_guard
     if new_failures:
-        decision["floor_output_tail"] = repaired_floor.output[-2000:]
+        decision["floor_output_tail"] = tail
         return _reject(f"regression floor introduced {len(new_failures)} new "
                        f"failure(s): {new_failures[:10]}")
 
-    decision["decision"] = "deploy"
-    decision["reason"] = "visible+held-out pass, surface frozen, regression floor green"
-    return CodeGateResult(deploy=True, reason=decision["reason"], decision=decision)
+    decision["diagnostic_comparison"] = {"status": "passed", "reason": "complete comparable diagnostics"}
+    return _reject(decision["deployment_verification"]["reason"])
 
 
 def _base_source(env: WorktreeEnv, tool_relpath: str) -> str:
@@ -345,20 +283,26 @@ def _base_source(env: WorktreeEnv, tool_relpath: str) -> str:
     import subprocess
 
     try:
-        show = subprocess.run(
-            ["git", "show", f"HEAD:{tool_relpath}"],
-            cwd=str(env.worktree), capture_output=True, text=True, timeout=60,
+        verifier = getattr(env, "assert_git_metadata", None)
+        if verifier is not None:
+            verifier()
+        show = _run(
+            ["git", "show", "--no-ext-diff", "--no-textconv", f"HEAD:{tool_relpath}"],
+            cwd=env.worktree, timeout=60,
         )
         if show.returncode == 0:
             return show.stdout
-        exists = subprocess.run(
-            ["git", "cat-file", "-e", f"HEAD:{tool_relpath}"],
-            cwd=str(env.worktree), capture_output=True, text=True, timeout=60,
+        exists = _run(
+            ["git", "ls-tree", "HEAD", "--", tool_relpath],
+            cwd=env.worktree, timeout=60,
         )
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except (subprocess.TimeoutExpired, OSError, WorktreeError) as exc:
         raise CodeGateError(f"git failed deriving base source of {tool_relpath}: {exc}")
     if exists.returncode != 0:
-        return ""  # path absent at HEAD — genuinely new, additions-only is correct
+        raise CodeGateError(f"git failed inspecting base source of {tool_relpath}: "
+                            f"{exists.stderr.strip()}")
+    if not exists.stdout.strip():
+        return ""
     raise CodeGateError(
         f"could not read base source of {tool_relpath} from HEAD "
         f"(it exists at HEAD but git show failed: {show.stderr.strip()})"
@@ -372,7 +316,7 @@ def _baseline_diff_floor(
 ) -> tuple[list[str], dict, str]:
     """Run the regression floor on repaired vs base source; return the failures
     the repair INTRODUCED (not pre-existing), a guard dict, and the repaired
-    output tail. The held-out gate performs the same checks inline."""
+    output tail. Both gate variants use the same completion requirements."""
     repaired_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
     if scope_error := _file_scope_violation(env, tool_relpath, guards):
         raise CodeGateError(scope_error)
@@ -384,11 +328,14 @@ def _baseline_diff_floor(
         # nothing must not be scored as green.
         raise NonAuthoritativeRunError(
             f"regression floor exited {repaired_floor.exit_code} after "
-            f"{round(repaired_floor.duration_seconds, 1)}s; it made no statement about "
-            f"what failed: {repaired_floor.output[-500:]}"
+            f"{round(repaired_floor.duration_seconds, 1)}s — it did not finish with "
+            f"complete evidence, so its failures cannot be diffed. "
+            f"{_incomplete_hint(repaired_floor.output)} {repaired_floor.output[-500:]}"
         )
-    repaired_failures = _parse_pytest_failures(repaired_floor.output)
+    repaired_failures = set(repaired_floor.failures)
     if base_src == "":
+        if not repaired_floor.passed or not repaired_floor.selected or repaired_floor.skipped:
+            raise NonAuthoritativeRunError("new-file floor requires complete green execution")
         base_failures: set[str] = set()
     else:
         env.write_tool(tool_relpath, base_src)
@@ -403,7 +350,11 @@ def _baseline_diff_floor(
                 f"regression floor baseline exited {base_floor.exit_code}; without a "
                 f"baseline the diff would attribute pre-existing failures to the repair"
             )
-        base_failures = _parse_pytest_failures(base_floor.output)
+        if (not repaired_floor.selected or repaired_floor.selected != base_floor.selected
+                or not repaired_floor.trusted_inputs_id
+                or repaired_floor.trusted_inputs_id != base_floor.trusted_inputs_id):
+            raise NonAuthoritativeRunError("regression floor lacks comparable reviewed diagnostic identities")
+        base_failures = set(base_floor.failures)
     new_failures = sorted(repaired_failures - base_failures)
     guard = {
         "ran": list(floor_paths),
@@ -470,16 +421,19 @@ def run_code_oracle_gate(
             "rounds_used": len(repair_result.rounds),
         },
         "guards": guards,
+        "deployment_verification": verify_deployment(env, tool_relpath=tool_relpath),
+        "diagnostic_comparison": {"status": "inconclusive", "reason": "diagnostics not completed"},
         "run_inputs": run_inputs or {},
     }
 
-    def _reject(reason: str) -> CodeGateResult:
-        decision["decision"] = "incorrect"
+    def _reject(reason: str, *, failed: bool = False) -> CodeGateResult:
+        decision["decision"] = "incorrect" if failed else "inconclusive"
+        decision["diagnostic_comparison"] = {"status": "failed" if failed else "inconclusive", "reason": reason}
         decision["reason"] = reason
         return CodeGateResult(deploy=False, reason=reason, decision=decision)
 
     if not repair_result.fixed or repair_result.final_source is None:
-        return _reject("repair did not produce a fix that passes the bug tests")
+        return _reject("repair did not produce a fix that passes the bug tests", failed=True)
     repaired = repair_result.final_source
 
     # surface freeze + blast radius (against the buggy parent the repair started from)
@@ -487,19 +441,19 @@ def run_code_oracle_gate(
     guards["freeze_ok"] = not violations
     guards["freeze_violations"] = violations
     if violations:
-        return _reject("freeze/diff-shape violation: " + "; ".join(violations))
+        return _reject("freeze/diff-shape violation: " + "; ".join(violations), failed=True)
 
     # file scope — only the target tool may change; no test file touched
     if scope_error := _file_scope_violation(env, tool_relpath, guards):
-        return _reject(scope_error)
+        return _reject(scope_error, failed=not scope_error.startswith("file scope could not"))
 
     # the bug is actually fixed
     bug_fail = env.failing_tests(*bug_tests)
     if scope_error := _file_scope_violation(env, tool_relpath, guards):
-        return _reject(scope_error)
+        return _reject(scope_error, failed=not scope_error.startswith("file scope could not"))
     guards["bug_tests_passed"] = not bug_fail
     if bug_fail:
-        return _reject(f"repair does not pass the bug tests: {sorted(bug_fail)[:6]}")
+        return _reject(f"repair does not pass the bug tests: {sorted(bug_fail)[:6]}", failed=True)
 
     # oracle match — the repair introduces no failure the upstream fix doesn't
     # also have, across the FULL fix-commit test file (catches a fix that passes
@@ -509,13 +463,13 @@ def run_code_oracle_gate(
     oracle_scope = pass_to_pass or (test_relpath,)
     new_vs_oracle = sorted(env.failing_tests(*oracle_scope) - set(oracle_failures))
     if scope_error := _file_scope_violation(env, tool_relpath, guards):
-        return _reject(scope_error)
+        return _reject(scope_error, failed=not scope_error.startswith("file scope could not"))
     guards["oracle_match"] = {"new_vs_oracle": new_vs_oracle,
                               "oracle_failure_count": len(oracle_failures),
                               "oracle_scope_size": len(oracle_scope)}
     if new_vs_oracle:
         return _reject(f"repair fails {len(new_vs_oracle)} test(s) the upstream fix "
-                       f"passes: {new_vs_oracle[:6]}")
+                       f"passes: {new_vs_oracle[:6]}", failed=True)
 
     # optional broad cross-tool regression floor (off by default — oracle-match
     # above is the regression check for a measurement run)
@@ -523,16 +477,17 @@ def run_code_oracle_gate(
         try:
             new_failures, floor_guard, tail = _baseline_diff_floor(
                 env, tool_relpath, repaired, base_src, floor_paths, guards)
-        except CodeGateError as exc:
-            return _reject(str(exc))
+        except (CodeGateError, NonAuthoritativeRunError) as exc:
+            return _reject(str(exc), failed=str(exc).startswith(("a test file was modified:", "files other than")))
         guards["floor"] = floor_guard
         if new_failures:
             decision["floor_output_tail"] = tail
             return _reject(f"regression floor introduced {len(new_failures)} new "
-                           f"failure(s): {new_failures[:10]}")
+                           f"failure(s): {new_failures[:10]}", failed=True)
     else:
         guards["floor"] = None
 
+    decision["diagnostic_comparison"] = {"status": "passed", "reason": "complete oracle comparison diagnostics"}
     decision["decision"] = "correct"
-    decision["reason"] = "bug fixed, matches upstream-fix oracle, surface frozen, floor green"
-    return CodeGateResult(deploy=True, reason=decision["reason"], decision=decision)
+    decision["reason"] = decision["deployment_verification"]["reason"]
+    return CodeGateResult(deploy=False, reason=decision["reason"], decision=decision)

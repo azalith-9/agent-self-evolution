@@ -41,6 +41,11 @@ from dspy.utils.exceptions import LMAuthError
 
 from evolution.core.hermes_provider import HermesProviderError
 from evolution.core.oauth_helpers import parse_iso_or_epoch
+from evolution.core.lm_timing_callback import (
+    COST_LEDGER,
+    auth_recovery_scope,
+    inference_auth_scope,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -455,43 +460,42 @@ class NousLM(dspy.LM):
 
     def forward(self, prompt=None, messages=None, **kwargs):  # type: ignore[override]
         self._ensure_credentials()
-        try:
-            return super().forward(prompt=prompt, messages=messages, **kwargs)
-        except (litellm.AuthenticationError, LMAuthError):
-            # Cached agent_key is dead despite passing the skew check.
-            # Force re-mint (which may also refresh OAuth on its own 401)
-            # and retry once. If the freshly-minted key is also rejected
-            # the OAuth grant has likely been revoked entirely; surface
-            # that explicitly so the operator gets the right recovery
-            # hint instead of a generic 401.
-            self._force_remint()
+        with inference_auth_scope(self.model, self.kwargs["api_key"]) as attempt:
             try:
                 return super().forward(prompt=prompt, messages=messages, **kwargs)
-            except (litellm.AuthenticationError, LMAuthError) as exc:
-                raise HermesProviderError(
-                    "Nous Portal inference rejected a freshly-minted "
-                    "agent_key after an automatic re-mint. The OAuth "
-                    "grant may have been revoked. Run `hermes model` "
-                    "and select Nous Portal to re-authenticate."
-                ) from exc
+            except (litellm.AuthenticationError, LMAuthError):
+                self._force_remint()
+                try:
+                    with auth_recovery_scope(attempt, self.model, self.kwargs["api_key"]):
+                        result = super().forward(prompt=prompt, messages=messages, **kwargs)
+                except (litellm.AuthenticationError, LMAuthError) as exc:
+                    raise self._terminal_inference_error() from exc
+                COST_LEDGER.clear_recovered_auth(attempt)
+                return result
 
     async def aforward(self, prompt=None, messages=None, **kwargs):  # type: ignore[override]
         self._ensure_credentials()
-        try:
-            return await super().aforward(prompt=prompt, messages=messages, **kwargs)
-        except (litellm.AuthenticationError, LMAuthError):
-            self._force_remint()
+        with inference_auth_scope(self.model, self.kwargs["api_key"]) as attempt:
             try:
-                return await super().aforward(
-                    prompt=prompt, messages=messages, **kwargs
-                )
-            except (litellm.AuthenticationError, LMAuthError) as exc:
-                raise HermesProviderError(
-                    "Nous Portal inference rejected a freshly-minted "
-                    "agent_key after an automatic re-mint. The OAuth "
-                    "grant may have been revoked. Run `hermes model` "
-                    "and select Nous Portal to re-authenticate."
-                ) from exc
+                return await super().aforward(prompt=prompt, messages=messages, **kwargs)
+            except (litellm.AuthenticationError, LMAuthError):
+                self._force_remint()
+                try:
+                    with auth_recovery_scope(attempt, self.model, self.kwargs["api_key"]):
+                        result = await super().aforward(prompt=prompt, messages=messages, **kwargs)
+                except (litellm.AuthenticationError, LMAuthError) as exc:
+                    raise self._terminal_inference_error() from exc
+                COST_LEDGER.clear_recovered_auth(attempt)
+                return result
+
+    @staticmethod
+    def _terminal_inference_error() -> HermesProviderError:
+        return HermesProviderError(
+            "Nous Portal inference rejected a freshly-minted "
+            "agent_key after an automatic re-mint. The OAuth "
+            "grant may have been revoked. Run `hermes model` "
+            "and select Nous Portal to re-authenticate."
+        )
 
 
 # ----------------------------------------------------------------------

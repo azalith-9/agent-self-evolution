@@ -9,6 +9,8 @@ trigger it; it never evolves or opens a PR on its own.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 from evolution.monitor.sentinel import RepairCandidate
@@ -44,7 +46,15 @@ def build_queue(candidates: list[RepairCandidate], *, repo: str, since_days: int
 def write_queue(output_dir: Path, payload: dict) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "triage_queue.json"
-    path.write_text(json.dumps(payload, indent=2))
+    fd, temporary = tempfile.mkstemp(prefix=".triage_queue_", dir=output_dir)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
     return path
 
 

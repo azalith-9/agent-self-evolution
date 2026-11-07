@@ -5,6 +5,8 @@ Supports length penalties and multi-dimensional scoring.
 """
 
 import logging
+import math
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -79,6 +81,8 @@ class LLMJudge:
         self.config = config
         self.profile = config.fitness_profile
         self.judge = dspy.ChainOfThought(self.JudgeSignature)
+        self._lm: Any = None
+        self._lm_lock = threading.Lock()
 
     def score(
         self,
@@ -88,10 +92,14 @@ class LLMJudge:
     ) -> FitnessScore:
         """Score an agent output using LLM-as-judge."""
 
-        # request_timeout=60 ≈ 6x P99 of the slowest observed gpt-4.1-mini
-        # call. TimeoutError after retries propagates to GEPA's fallback path.
-        _lm = self.config.get_lm("eval")
-        lm = dspy.LM(_lm.model, engine="litellm", **_lm.lm_kwargs, temperature=0.0, max_tokens=4000, request_timeout=60, num_retries=5)
+        with self._lm_lock:
+            if self._lm is None:
+                resolved = self.config.get_lm("eval")
+                self._lm = dspy.LM(
+                    resolved.model, engine="litellm", **resolved.lm_kwargs,
+                    temperature=0.0, max_tokens=4000, request_timeout=60, num_retries=5,
+                )
+            lm = self._lm
 
         with dspy.context(lm=lm):
             result = self.judge(
@@ -363,6 +371,7 @@ def _clamp_to_unit(value: str) -> float:
     noisy judge call shouldn't crash a whole optimization run.
     """
     try:
-        return min(1.0, max(0.0, float(str(value).strip())))
+        parsed = float(str(value).strip())
+        return min(1.0, max(0.0, parsed)) if math.isfinite(parsed) else 0.5
     except (ValueError, TypeError):
         return 0.5

@@ -41,6 +41,16 @@ Install `uv sync --extra miprov2` to enable
 the fallback optimizer. See [dependency constraints](docs/dependencies.md)
 for the provider compatibility and upgrade boundaries.
 
+**[PLANNED — Implementation Pending] Contained execution.** Repairs and real-agent
+validation require a backend that verifies the requested filesystem, network, and
+process-cleanup capabilities before repository code runs. Linux uses Bubblewrap;
+macOS requires an OS policy covering the full process tree. An installed sandbox
+binary alone is insufficient. Prepare build/test dependencies separately for
+offline repository execution. See [run repairs with contained execution](docs/howto/run-contained-repairs.md)
+for prerequisites, configuration, and refusal handling. These are the intended
+execution requirements described by the specification; they are not verified
+guarantees of the current implementation.
+
 **Evolve an installed skill with Hermes Agent.** Provider/model defaults come from `~/.hermes/config.yaml`, credentials from `~/.hermes/auth.json` or provider environment variables. Skills are discovered under `~/.hermes/hermes-agent/skills/`; set `SKILL_SOURCES_HERMES_REPO` if your checkout is elsewhere. Replace the example skill name with one you have installed.
 
 ```bash
@@ -56,7 +66,7 @@ uv run python -m evolution.skills.evolve_skill \
     --optimizer-model anthropic/claude-opus-4-5 --eval-model anthropic/claude-opus-4-5
 ```
 
-**Evolve a Claude Code `CLAUDE.md` convention.** The bundled convention suite scores wrapper-command adherence without an LLM judge. This backend requires macOS with `sandbox-exec`, the `claude` CLI, and `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, plus provider credentials for GEPA reflection. It refuses to run agent tasks when the OS sandbox is unavailable.
+**Evolve a Claude Code `CLAUDE.md` convention.** The bundled convention suite scores wrapper-command adherence without an LLM judge. Install the `claude` CLI and obtain `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, plus provider credentials for GEPA reflection. Under the planned execution contract, both Claude and Hermes validation require a capable containment backend on Linux or macOS and refuse unavailable required capabilities. A validation agent receives only its selected provider credential and explicitly authorized network policy; subsequent test commands receive neither credential nor network access.
 
 Add a non-empty, named region to your `CLAUDE.md` before running:
 
@@ -120,16 +130,30 @@ The gate is useful whether or not GEPA generated the candidate. Bring your own c
 uv run python -m evolution.validation.closed_loop --tool patch --hermes-repo ~/.hermes/hermes-agent \
     --tasks suite.jsonl --baseline baseline.py --evolved my_change.py --noise-aware-gate
 
-# "Repair this broken tool and check held-out behavior + the public surface."
-# Throwaway worktree + isolated venv; held-out split, surface freeze, file scope, regression floor.
-# Test execution is OS-confined where the platform supports it (macOS), and the posture is
-# recorded either way; --require-sandbox refuses to run unconfined.
-uv run python -m evolution.code.evolve_code --repo ~/.hermes/hermes-agent \
-    --tool tools/foo.py --visible-test tests/tools/test_foo_a.py --holdout-test tests/tools/test_foo_b.py
-
 # "What real bugs in this repo's git stream could the loop fix?" ($0, pure git, no LLM)
 uv run python -m evolution.monitor --repo ~/.hermes/hermes-agent
 ```
+
+**[PLANNED — Implementation Pending] Repair with authoritative evidence.** Set
+`REPAIR_REPO` to the target Git checkout and the other variables to its tool,
+visible-test, and held-out-test paths, relative to that checkout. Prepare its
+dependencies first. This invocation requests required containment and local
+proposal artifacts; it can spend on proposer inference:
+
+```bash
+uv run --no-sync python -m evolution.code.evolve_code \
+    --repo "${REPAIR_REPO:?Set the target Git checkout}" \
+    --tool "${REPAIR_TOOL:?Set the repository-relative tool path}" \
+    --visible-test "${REPAIR_VISIBLE_TEST:?Set the repository-relative visible test path}" \
+    --holdout-test "${REPAIR_HOLDOUT_TEST:?Set the repository-relative held-out test path}" \
+    --require-sandbox --no-create-pr
+```
+
+The planned default requires verified containment for setup, imports, tests, and
+benchmarks. Missing capabilities cause refusal before repository code executes.
+`--allow-unconfined` is diagnostic only and cannot supply deployment evidence.
+See the [contained repair guide](docs/howto/run-contained-repairs.md) for the
+execution and evidence requirements.
 
 The tool-code gate combines held-out tests, surface freeze, and a baseline-diff regression floor to check single-file repairs. Its evidence is limited to the tests and structural checks actually run.
 
@@ -172,9 +196,21 @@ tests are a development check (`uv run pytest tests/ -q`); broader candidate
 benchmarks can be supplied with `--benchmark-cmd`. Shipping controls and the
 human-review boundary are described in the [usage guide](docs/usage.md).
 
-Hermes validation redirects `HOME`/`HERMES_HOME` but does not OS-confine the
-agent. The macOS sandbox used for Claude validation and code tests restricts
-writes outside allowed roots; reads, process execution, and network remain unrestricted.
+**[PLANNED — Implementation Pending] Execution guardrails.** Repair and validation
+execution use explicit read/write roots, private home/cache/temp paths, and fresh
+environments. Host credential stores and control sockets remain inaccessible.
+Repository setup, imports, tests, and benchmarks run offline without credentials;
+validation agents receive only separately authorized provider access. Both Hermes
+and Claude require containment of the full process tree. Private home directories
+alone do not establish this boundary.
+
+Required capabilities are checked before execution. Bounded cleanup must cover
+descendants even after normal exit, timeout, or cancellation. Missing containment,
+unknown cleanup, incomplete test evidence, or failed Git scope inspection blocks
+authoritative deployment evidence. Diagnostic runs cannot override these
+requirements. See [execution safety](docs/concepts/execution-safety.md) and
+[execution contracts](docs/reference/execution-contracts.md) for the intended
+guarantees and the limits of evidence against deliberate forgery.
 
 ## Operating the Sentinel
 
@@ -194,6 +230,7 @@ See **[docs/operating_the_sentinel.md](docs/operating_the_sentinel.md)** for the
 
 - **[docs/usage.md](docs/usage.md)** — worked examples for every target, plus tuning, shipping, and validation
 - **[docs/interfaces.md](docs/interfaces.md)** — complete CLI flag reference
+- **[Contained repair guide](docs/howto/run-contained-repairs.md)** — planned execution prerequisites, configuration, and evidence requirements
 - **[docs/model_resolution.md](docs/model_resolution.md)** — provider/model resolution, local servers, per-role overrides
 - **[docs/framework_advantages.md](docs/framework_advantages.md)** — why the layered gate beats raw DSPy + GEPA
 - **[docs/architecture.md](docs/architecture.md)** + **[docs/workflows.md](docs/workflows.md)** — system design and step-by-step traces

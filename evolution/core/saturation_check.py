@@ -185,6 +185,8 @@ def saturation_preflight(
             )
         report = closed_loop_cache.force_run(baseline_artifact_text)
         per_example = [1.0 if t.passed else 0.0 for t in report.evolved.tasks]
+        if not per_example:
+            raise ValueError("closed-loop baseline suite has no tasks")
         closed_loop_per_example = per_example
         closed_loop_n = len(per_example)
         closed_loop_mean = sum(per_example) / len(per_example) if per_example else 0.0
@@ -203,6 +205,8 @@ def saturation_preflight(
             baseline_artifact_text + "\n\n" + floor_text
         )
         floor_per_example = [1.0 if t.passed else 0.0 for t in floor_report.evolved.tasks]
+        if not floor_per_example:
+            raise ValueError("closed-loop compiled-floor suite has no tasks")
         floor_n = len(floor_per_example)
         floor_mean = sum(floor_per_example) / len(floor_per_example) if floor_per_example else 0.0
 

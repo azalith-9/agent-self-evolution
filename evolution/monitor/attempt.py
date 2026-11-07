@@ -9,7 +9,7 @@ annotated queue and decides what to deploy.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from evolution.code.campaign import Skip, run_organism
 from evolution.code.campaign_report import OrganismResult
@@ -17,7 +17,7 @@ from evolution.code.harvest import Candidate
 from evolution.monitor.sentinel import RepairCandidate
 
 
-def _build_runner(*, proposer_model, base_python, seeds, max_rounds, max_cost_usd):
+def _build_runner(*, proposer_model, base_python, seeds, max_rounds, max_cost_usd, require_sandbox=True):
     """The real organism runner: sets up the proposer LM + cost tracking exactly
     as the campaign does, and returns a callable (repo, Candidate) -> result."""
     import dspy
@@ -43,7 +43,8 @@ def _build_runner(*, proposer_model, base_python, seeds, max_rounds, max_cost_us
     engine = RepairEngine(build_dspy_proposer(lm), max_rounds=max_rounds)
 
     def _run(repo: Path, c: Candidate):
-        return run_organism(repo, c, engine, seeds=seeds, base_python=base_python)
+        return run_organism(repo, c, engine, seeds=seeds, base_python=base_python,
+                            require_sandbox=require_sandbox)
 
     return _run, COST_LEDGER.summary
 
@@ -61,6 +62,8 @@ def attempt_candidates(
     console=None,
     organism_runner=None,
     cost_summary=dict,
+    require_sandbox: bool = True,
+    persist: Callable[[dict], None] | None = None,
 ) -> None:
     """Attempt each candidate; annotate ``payload['candidates']`` rows in place
     with the verdict. ``organism_runner`` is an injection seam for testing."""
@@ -71,17 +74,24 @@ def attempt_candidates(
         prune_orphan_worktrees(repo)  # self-heal leaks from a prior hard-killed run
         organism_runner, cost_summary = _build_runner(
             proposer_model=proposer_model, base_python=base_python,
-            seeds=seeds, max_rounds=max_rounds, max_cost_usd=max_cost_usd)
+            seeds=seeds, max_rounds=max_rounds, max_cost_usd=max_cost_usd,
+            require_sandbox=require_sandbox)
 
     by_key = {(r["tool"], r["fix_sha"]): r for r in payload.get("candidates", [])}
     for rc in candidates:
         c = Candidate(rc.tool_path, rc.test_path, rc.fix_sha, rc.parent_sha)
         row = by_key.get((rc.tool_path, rc.fix_sha))
+        if row is not None:
+            row["attempt"] = {"status": "running"}
+        if persist is not None:
+            persist(payload)
         try:
             res = organism_runner(repo, c)
         except CostCeilingExceeded:
             if row is not None:
                 row["attempt"] = {"status": "cost_ceiling"}
+            if persist is not None:
+                persist(payload)
             if console is not None:
                 console.print("[yellow]cost ceiling reached during attempts[/yellow]")
             break
@@ -92,6 +102,9 @@ def attempt_candidates(
             attempt = {"status": res.reason if isinstance(res, Skip) else "not_valid"}
         if row is not None:
             row["attempt"] = attempt
+        payload["cost_summary"] = cost_summary()
+        if persist is not None:
+            persist(payload)
         if console is not None:
             console.print(f"  attempted {rc.tool_path.split('/')[-1]}@{rc.fix_sha[:8]}: "
                           f"{attempt}")

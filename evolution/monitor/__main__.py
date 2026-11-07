@@ -39,9 +39,11 @@ console = Console()
               help="Cost ceiling for --attempt-top.")
 @click.option("--proposer-model", default=None)
 @click.option("--base-python", default=None)
+@click.option("--require-sandbox/--allow-unconfined", default=True,
+              help="Require capability-tested containment for repair attempts.")
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
 def main(repo_root, since_days, max_per_tool, top, attempt_top, max_cost_usd,
-         proposer_model, base_python, output_dir):
+         proposer_model, base_python, output_dir, require_sandbox):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s",
                         datefmt="%H:%M:%S")
     if output_dir is None:
@@ -63,9 +65,15 @@ def main(repo_root, since_days, max_per_tool, top, attempt_top, max_cost_usd,
 
     if attempt_top:
         from evolution.monitor.attempt import attempt_candidates  # noqa: PLC0415
-        attempt_candidates(repo_root, candidates[:attempt_top], payload,
-                           max_cost_usd=max_cost_usd, proposer_model=proposer_model,
-                           base_python=base_python, console=console)
+        write_queue(output_dir, payload)
+        try:
+            attempt_candidates(repo_root, candidates[:attempt_top], payload,
+                               max_cost_usd=max_cost_usd, proposer_model=proposer_model,
+                               base_python=base_python, console=console, require_sandbox=require_sandbox,
+                               persist=lambda current: write_queue(output_dir, current))
+        finally:
+            write_queue(output_dir, payload)
+            (output_dir / "triage_report.md").write_text(render_report(payload, top=top))
 
     qpath = write_queue(output_dir, payload)
     (output_dir / "triage_report.md").write_text(render_report(payload, top=top))

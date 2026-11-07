@@ -49,6 +49,22 @@ def _happy_path_side_effect(pr_url: str = "https://github.com/o/r/pull/42"):
     return responses
 
 
+def _with_worktree(responses):
+    iterator = iter(responses)
+
+    def run(argv, **kwargs):
+        if argv[:3] == ["git", "worktree", "remove"]:
+            return _ok()
+        result = next(iterator)
+        if isinstance(result, BaseException):
+            raise result
+        if argv[:3] == ["git", "worktree", "add"] and result.returncode == 0:
+            Path(argv[-2]).mkdir(parents=True, exist_ok=True)
+        return result
+
+    return run
+
+
 class TestPRAutomation:
     def _kwargs(self, tmp_path: Path, **overrides):
         evolved = tmp_path / "evolved.md"
@@ -74,7 +90,7 @@ class TestPRAutomation:
 
     def test_happy_path_creates_pr(self, tmp_path: Path):
         responses = _happy_path_side_effect("https://github.com/o/r/pull/123")
-        with patch("evolution.core.pr_automation.subprocess.run", side_effect=responses):
+        with patch("evolution.core.pr_automation.subprocess.run", side_effect=_with_worktree(responses)):
             result = create_pr(**self._kwargs(tmp_path))
         assert result.status == "created"
         assert result.url == "https://github.com/o/r/pull/123"
@@ -93,7 +109,7 @@ class TestPRAutomation:
 
     def test_skipped_on_dirty_tree_when_allow_dirty_false(self, tmp_path: Path):
         responses = [_ok(stdout=" M file.txt\n?? other.txt\n")]
-        with patch("evolution.core.pr_automation.subprocess.run", side_effect=responses):
+        with patch("evolution.core.pr_automation.subprocess.run", side_effect=_with_worktree(responses)):
             result = create_pr(**self._kwargs(tmp_path))
         assert result.status == "skipped"
         assert "dirty" in result.reason.lower()
@@ -109,7 +125,7 @@ class TestPRAutomation:
             _ok(),                            # push
             _ok(stdout="https://github.com/o/r/pull/9\n"),  # gh pr create
         ]
-        with patch("evolution.core.pr_automation.subprocess.run", side_effect=responses):
+        with patch("evolution.core.pr_automation.subprocess.run", side_effect=_with_worktree(responses)):
             result = create_pr(**self._kwargs(tmp_path, allow_dirty=True))
         assert result.status == "created"
         assert result.url == "https://github.com/o/r/pull/9"
@@ -122,7 +138,7 @@ class TestPRAutomation:
             _ok(),
             FileNotFoundError("gh: command not found"),
         ]
-        with patch("evolution.core.pr_automation.subprocess.run", side_effect=responses):
+        with patch("evolution.core.pr_automation.subprocess.run", side_effect=_with_worktree(responses)):
             result = create_pr(**self._kwargs(tmp_path))
         assert result.status == "failed"
         assert "gh" in result.reason.lower()
@@ -136,7 +152,7 @@ class TestPRAutomation:
             _ok(stdout="abc1234\n"),
             _fail(stderr="remote: Permission denied to user@example.com\n"),
         ]
-        with patch("evolution.core.pr_automation.subprocess.run", side_effect=responses):
+        with patch("evolution.core.pr_automation.subprocess.run", side_effect=_with_worktree(responses)):
             result = create_pr(**self._kwargs(tmp_path))
         assert result.status == "failed"
         assert "Permission denied" in result.reason

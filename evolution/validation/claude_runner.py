@@ -26,17 +26,20 @@ executing an unconfined agent — set ``require_sandbox=False`` to override deli
 from __future__ import annotations
 
 import json
-import os
+import math
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
 import litellm
 
+from evolution.core.execution import ExecutionPolicy, ExecutionRequest
+from evolution.core.process import run_process
 from evolution.core.lm_timing_callback import (
     COST_LEDGER,
     CostCeilingExceeded,
@@ -90,12 +93,9 @@ class ClaudeCodeAgentRunner:
         home = Path(tempfile.mkdtemp(prefix="cl_claude_home_"))
         try:
             (home / ".claude").mkdir(parents=True, exist_ok=True)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "CLAUDE_CODE_OAUTH_TOKEN": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", ""),
-                **ctx.extra_env,
-            }
+            from evolution.validation.runner_environment import agent_environment
+
+            env = agent_environment(home, ctx.extra_env, credential_keys=("CLAUDE_CODE_OAUTH_TOKEN",))
             # Candidate skill delivery: a fresh-HOME `claude -p` does NOT discover
             # personal ~/.claude/skills; skills are delivered as a plugin via
             # --plugin-dir (verified). Wrap the installer's skills_src dir in a
@@ -118,16 +118,25 @@ class ClaudeCodeAgentRunner:
                 claude_argv += ["--plugin-dir", str(plugin_dir)]
             if self.append_prompt_file is not None:
                 claude_argv += ["--append-system-prompt-file", str(self.append_prompt_file)]
-            argv = self._wrap_in_sandbox(
-                claude_argv, write_roots=[Path(ctx.fixture_dir).resolve(), home.resolve()]
+            from evolution.validation.runner_environment import agent_read_roots
+
+            from evolution.core.execution import select_executable
+
+            claude_argv[0] = select_executable(claude_argv[0], cwd=Path(ctx.fixture_dir).resolve(), env=env) or claude_argv[0]
+            read_roots = agent_read_roots(claude_argv[0])
+            if self.append_prompt_file is not None:
+                read_roots.append(self.append_prompt_file)
+            request = ExecutionRequest(
+                argv=claude_argv, cwd=Path(ctx.fixture_dir).resolve(), env=env,
+                policy=ExecutionPolicy(read_roots=read_roots,
+                    write_roots=[Path(ctx.fixture_dir).resolve(), home.resolve()],
+                    network="allow", required=self.require_sandbox),
+                timeout_seconds=self.timeout_seconds, cleanup_timeout_seconds=2,
+                invocation_id=uuid.uuid4().hex,
             )
             start = time.time()
             try:
-                proc = subprocess.run(
-                    argv, env=env, cwd=str(ctx.fixture_dir),
-                    capture_output=True, text=True,
-                    timeout=self.timeout_seconds, check=False,
-                )
+                proc = run_process(request, secrets=[env.get("CLAUDE_CODE_OAUTH_TOKEN", "")])
             except subprocess.TimeoutExpired:
                 result = AgentRunResult(
                     tool_calls_seq=[], final_text_tail="",
@@ -141,10 +150,19 @@ class ClaudeCodeAgentRunner:
                     error=f"claude command not found: {exc}",
                 )
             else:
-                result = _parse_stream_json(
-                    proc.stdout, duration_seconds=time.time() - start,
-                    stderr_tail=proc.stderr[-500:],
-                )
+                if proc.timed_out or not proc.cleanup_complete or proc.error:
+                    result = AgentRunResult(
+                        tool_calls_seq=[], final_text_tail="", duration_seconds=time.time() - start,
+                        error=proc.error or ("claude -p timed out" if proc.timed_out else "claude cleanup unverified"),
+                    )
+                else:
+                    result = _parse_stream_json(
+                        proc.stdout, duration_seconds=time.time() - start,
+                        stderr_tail=_redact(proc.stderr[-500:], env),
+                    )
+                    if proc.exit_code != 0 and result.error is None:
+                        from dataclasses import replace
+                        result = replace(result, error=f"claude exited with status {proc.exit_code}")
         finally:
             shutil.rmtree(home, ignore_errors=True)
         # Record + enforce the cost ceiling eagerly: Layer-1/convention scoring
@@ -180,7 +198,9 @@ class ClaudeCodeAgentRunner:
             )
             + "\n"
         )
-        shutil.copytree(skills_src, plugin_dir / "skills", dirs_exist_ok=True)
+        from evolution.validation.runner_environment import copy_skills
+
+        copy_skills(Path(skills_src), plugin_dir / "skills")
         return plugin_dir
 
     def _wrap_in_sandbox(self, claude_argv: list[str], *, write_roots: list[Path]) -> list[str]:
@@ -206,6 +226,13 @@ class ClaudeCodeAgentRunner:
         return claude_argv
 
 
+
+
+def _redact(text: str, env: dict[str, str]) -> str:
+    for key, value in env.items():
+        if value and any(marker in key for marker in ("TOKEN", "KEY", "SECRET", "PASSWORD")):
+            text = text.replace(value, "[REDACTED]")
+    return text
 
 
 def _price_from_tokens(model: Optional[str], tokens: dict) -> Optional[float]:
@@ -255,6 +282,9 @@ def _parse_stream_json(
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(ev, dict):
+            err = "malformed claude stream event"
+            continue
         etype = ev.get("type")
         if etype == "system" and ev.get("subtype") == "init":
             model_name = ev.get("model") or model_name
@@ -273,13 +303,29 @@ def _parse_stream_json(
             saw_result = True
             final_text = str(ev.get("result") or "")
             cost = ev.get("total_cost_usd")
-            u = ev.get("usage") or {}
-            tokens = {
-                "input_tokens": u.get("input_tokens", 0),
-                "output_tokens": u.get("output_tokens", 0),
-                "cache_read_tokens": u.get("cache_read_input_tokens", 0),
-                "cache_write_tokens": u.get("cache_creation_input_tokens", 0),
-            }
+            u = ev.get("usage")
+            if u is None:
+                u = {}
+            if not isinstance(u, dict):
+                err = "malformed claude token usage (expected object)"
+                u = {}
+            tokens = {}
+            for source, destination in (
+                ("input_tokens", "input_tokens"),
+                ("output_tokens", "output_tokens"),
+                ("cache_read_input_tokens", "cache_read_tokens"),
+                ("cache_creation_input_tokens", "cache_write_tokens"),
+            ):
+                count = u.get(source)
+                if count is None:
+                    count = 0
+                if type(count) is not int or count < 0:
+                    err = "malformed claude token count"
+                    count = 0
+                tokens[destination] = count
+            if cost is not None and (type(cost) not in (int, float) or not math.isfinite(cost) or cost < 0):
+                err = "malformed claude cost"
+                cost = None
             if ev.get("is_error"):
                 err = f"claude result is_error: {final_text[:200]}"
 

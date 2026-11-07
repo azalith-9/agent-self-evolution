@@ -33,11 +33,15 @@ Three surfaces:
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Iterator, Optional
+from uuid import uuid4
 
 import litellm
 from dspy.utils.callback import BaseCallback
@@ -53,6 +57,44 @@ _HEARTBEAT_TIERS: tuple[tuple[int, int], ...] = (
     (300, logging.WARNING),
     (600, logging.WARNING),
 )
+
+
+@dataclass(frozen=True)
+class _AuthAttempt:
+    invocation_id: str
+    credential_id: str
+    generation: int = 0
+    recovering: bool = False
+
+
+def _credential_identity(model: str, api_key: str) -> str:
+    return hashlib.sha256((model.removeprefix("openai/") + "\0" + api_key).encode()).hexdigest()
+
+
+_AUTH_ATTEMPT: ContextVar[_AuthAttempt | None] = ContextVar("lm_auth_attempt", default=None)
+
+
+@contextmanager
+def inference_auth_scope(model: str, api_key: str) -> Iterator[_AuthAttempt]:
+    """Attribute callback failures to one inference without retaining credentials."""
+    attempt = _AuthAttempt(uuid4().hex, _credential_identity(model, api_key))
+    token = _AUTH_ATTEMPT.set(attempt)
+    try:
+        yield attempt
+    finally:
+        _AUTH_ATTEMPT.reset(token)
+
+
+@contextmanager
+def auth_recovery_scope(attempt: _AuthAttempt, model: str, api_key: str) -> Iterator[None]:
+    """Permit one retry through its own failure; preserve concurrent aborts."""
+    retry = replace(attempt, credential_id=_credential_identity(model, api_key),
+                    generation=attempt.generation + 1, recovering=True)
+    token = _AUTH_ATTEMPT.set(retry)
+    try:
+        yield
+    finally:
+        _AUTH_ATTEMPT.reset(token)
 
 
 class CostCeilingExceeded(BaseException):
@@ -166,6 +208,8 @@ def _log_litellm_failure(kwargs, exception, start_time, end_time) -> None:
     HermesProviderError. Defense-in-depth for credentials that go bad
     after preflight passed.
     """
+    if not isinstance(exception, BaseException):
+        exception = kwargs.get("exception", exception)
     model = kwargs.get("model", "<unknown>")
     duration = (end_time - start_time).total_seconds() if end_time else -1.0
     logger.warning(
@@ -183,8 +227,19 @@ def _log_litellm_failure(kwargs, exception, start_time, end_time) -> None:
             f"{type(exception).__name__}: {str(exception)[:200]}\n"
             "The credential may have expired during the run. Run "
             "`hermes auth` (or set the appropriate provider env var) and "
-            "re-run."
+            "re-run.",
+            attempt=_matching_auth_attempt(kwargs),
         )
+
+
+def _matching_auth_attempt(kwargs: dict[str, Any]) -> _AuthAttempt | None:
+    attempt = _AUTH_ATTEMPT.get()
+    key = kwargs.get("api_key")
+    model = kwargs.get("model")
+    if attempt is not None and isinstance(key, str) and isinstance(model, str):
+        if attempt.credential_id == _credential_identity(model, key):
+            return attempt
+    return None
 
 
 _register_lock = threading.Lock()
@@ -259,7 +314,7 @@ class CostLedger:
         # BaseLM.__call__ checks it and raises HermesProviderError so the
         # next worker abort propagates past dspy.Evaluate's `except
         # Exception` swallower (HermesProviderError is BaseException-derived).
-        self._auth_abort_message: Optional[str] = None
+        self._auth_failures: dict[str, tuple[str, _AuthAttempt | None]] = {}
         self._agent_cost_usd: float = 0.0
         self._n_agent_runs: int = 0
         self._n_cost_uncaptured: int = 0
@@ -272,27 +327,35 @@ class CostLedger:
             self._by_model.clear()
             self._ceiling_usd = None
             self._abort_requested = False
-            self._auth_abort_message = None
+            self._auth_failures.clear()
             self._agent_cost_usd = 0.0
             self._n_agent_runs = 0
             self._n_cost_uncaptured = 0
 
-    def _set_auth_abort(self, message: str) -> None:
-        """Set the auth-abort sentinel. First message wins — the original
-        failure is the actionable one; subsequent failures are usually
-        downstream effects of the same bad credential.
-        """
+    def _set_auth_abort(self, message: str, *, attempt: _AuthAttempt | None = None) -> None:
+        """Retain each failure independently until its exact attempt recovers."""
         with self._lock:
-            if self._auth_abort_message is None:
-                self._auth_abort_message = message
+            self._auth_failures[uuid4().hex] = (message, attempt)
+
+    def clear_recovered_auth(self, attempt: _AuthAttempt) -> None:
+        """Clear only the failed credential generation of a successful retry."""
+        with self._lock:
+            self._auth_failures = {
+                key: value for key, value in self._auth_failures.items()
+                if value[1] != attempt
+            }
 
     def get_auth_abort_message(self) -> Optional[str]:
-        """If a mid-run auth abort is pending, return its message;
-        otherwise None. The flag is not cleared by reading — every LM
-        call after the abort will keep raising until ``reset()``.
-        """
+        """Return the earliest unresolved failure applicable to this context."""
+        current = _AUTH_ATTEMPT.get()
         with self._lock:
-            return self._auth_abort_message
+            for message, failed in self._auth_failures.values():
+                if (current is not None and current.recovering and failed is not None
+                        and failed.invocation_id == current.invocation_id
+                        and failed.generation < current.generation):
+                    continue
+                return message
+        return None
 
     def set_ceiling(self, usd: Optional[float]) -> None:
         """Set the total-cost ceiling in USD. ``None`` disables. After the
@@ -518,4 +581,3 @@ def _install_cost_ceiling_lm_guard() -> None:
 
 
 _install_cost_ceiling_lm_guard()
-

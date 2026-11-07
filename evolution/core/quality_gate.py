@@ -18,7 +18,7 @@ from rich.console import Console
 
 from evolution.core.constraints import ConstraintResult
 from evolution.core.lm_timing_callback import COST_LEDGER, CostCeilingExceeded
-from evolution.skills.budget_aware_proposer import ProposerMode
+from evolution.core.config import ProposerMode
 
 _console = Console()
 

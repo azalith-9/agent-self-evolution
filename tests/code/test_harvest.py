@@ -89,7 +89,7 @@ class TestValidity:
     def test_validate_candidate_finds_bug_tests(self, bug_repo):
         repo, parent, fix = bug_repo
         bug = validate_candidate(repo, Candidate(
-            "tools/calc.py", "tests/tools/test_calc.py", fix, parent))
+            "tools/calc.py", "tests/tools/test_calc.py", fix, parent), require_sandbox=False)
         assert bug is not None
         # Both tests assert the fixed behavior; the buggy parent fails both.
         assert any("test_add" in t for t in bug.bug_tests)
@@ -101,5 +101,5 @@ class TestValidity:
         # Use fix as both parent and fix: the fix source passes its own tests, so
         # parent_failures == fix_failures → empty bug_tests → None.
         bug = validate_candidate(repo, Candidate(
-            "tools/calc.py", "tests/tools/test_calc.py", fix, fix))
+            "tools/calc.py", "tests/tools/test_calc.py", fix, fix), require_sandbox=False)
         assert bug is None

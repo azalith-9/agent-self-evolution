@@ -20,9 +20,7 @@ def paired_bootstrap(
 
     Resamples the per-example improvement vector (evolved - baseline)
     `n_resamples` times and returns mean + lower/upper percentile bounds
-    at the given two-sided confidence level. Uses the basic (reverse-
-    percentile) method, which is the literature-recommended choice when
-    sample size is small (≤20). BCa is the upgrade path once N≥20.
+    at the given two-sided confidence level. Uses percentile intervals. BCa intervals are a possible future upgrade.
 
     Args:
         baseline_scores: per-example scores of the baseline candidate.

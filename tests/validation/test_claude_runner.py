@@ -106,9 +106,10 @@ def test_price_from_tokens_none_when_unpriceable():
 
 def test_sandbox_profile_denies_writes_outside_roots(tmp_path):
     prof = _macos_write_sandbox_profile([tmp_path])
-    assert "(deny file-write*)" in prof
+    assert "(deny default)" in prof
     assert f'(subpath "{tmp_path}")' in prof
-    assert '(subpath "/private/var/folders")' in prof
+    assert '(subpath "/private/var/folders")' not in prof
+    assert "(deny network*)" in prof
 
 
 def test_refuses_to_run_unsandboxed(monkeypatch):

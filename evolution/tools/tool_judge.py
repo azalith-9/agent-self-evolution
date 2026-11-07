@@ -10,6 +10,7 @@ to score 0.0 with diagnostic feedback.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Callable, Optional
 
 import dspy
@@ -75,6 +76,8 @@ class ToolJudge:
         self.config = config
         self.profile = config.fitness_profile
         self.judge = dspy.ChainOfThought(ToolJudgeSignature)
+        self._lm: Any = None
+        self._lm_lock = threading.Lock()
 
     def score(
         self,
@@ -85,15 +88,14 @@ class ToolJudge:
     ) -> FitnessScore:
         """Score a tool-selection decision using LLM-as-judge."""
 
-        _lm = self.config.get_lm("eval")
-        lm = dspy.LM(
-            _lm.model, engine="litellm",
-            **_lm.lm_kwargs,
-            temperature=0.0,
-            max_tokens=4000,
-            request_timeout=60,
-            num_retries=5,
-        )
+        with self._lm_lock:
+            if self._lm is None:
+                resolved = self.config.get_lm("eval")
+                self._lm = dspy.LM(
+                    resolved.model, engine="litellm", **resolved.lm_kwargs,
+                    temperature=0.0, max_tokens=4000, request_timeout=60, num_retries=5,
+                )
+            lm = self._lm
 
         with dspy.context(lm=lm):
             result = self.judge(

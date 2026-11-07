@@ -2,6 +2,14 @@
 
 The public APIs, CLIs, and data contracts the codebase exposes — both to users and to the integration points it depends on.
 
+Shared repository execution follows the [execution and evaluation contracts](reference/execution-contracts.md).
+See [contained repair operation](howto/run-contained-repairs.md) for environment,
+network, path, and refusal configuration. These controls apply to existing APIs;
+there is no separate public executor CLI. Code-repair deployment uses the
+[internal verification contract](reference/deployment-evidence.md); no CLI flag
+turns cooperative diagnostics or `--allow-unconfined` into independent proof.
+Missing proof retains diagnostics and refuses deployment.
+
 ## CLI: `python -m evolution.skills.evolve_skill`
 
 The primary user-facing interface.
@@ -144,7 +152,18 @@ Evolves one tool's top-level `description` field inside an MCP-shape manifest. T
 
 Evolves one named section of an agent's system prompt. Two backends, selected by `--target`: `hermes` evolves a top-level string constant in Hermes Agent's `agent/prompt_builder.py` (e.g. `MEMORY_GUIDANCE`); `claude` evolves a sentinel-delimited region of a CLAUDE.md (`<!-- evolve:NAME start -->` … `<!-- evolve:NAME end -->`). Unlike the skill and tool paths, evaluation is **purely behavioral**: there is no synthetic LLM-judge signal. Every candidate is scored by running the real agent (`hermes -z` or `claude -p`) against the task suite, so the deploy gate is a `ClosedLoopValidator` run (pass-rate + win/loss), not a paired-bootstrap CI over judge scores. The agnostic core (GEPA, `ClosedLoopValidator`, scorer) is shared across both backends; `claude` is three adapter classes behind the existing AgentRunner / PromptSource / ArtifactInstaller protocols.
 
-For `--target claude`, the validation agent runs hermetically: a fresh tmp `HOME` (no ambient `~/.claude` CLAUDE.md / plugins / memory), an OS `sandbox` settings.json confining filesystem writes to the fixture dir, `--strict-mcp-config`, and `--no-session-persistence`. Auth is subscription-based via the `CLAUDE_CODE_OAUTH_TOKEN` env var (the runner does **not** pass `--bare`, which would ignore the token). The candidate region is injected statelessly through `--append-system-prompt-file`, so the user's real CLAUDE.md is never read or written during validation — only `--apply` writes it.
+For `--target claude`, the validation agent uses a fresh temporary `HOME` (no
+ambient `~/.claude` CLAUDE.md, plugins, or memory), `--strict-mcp-config`, and
+`--no-session-persistence`. OS-level containment confines filesystem writes to
+the fixture directory, including native Write/Edit tools. Claude's `sandbox`
+setting in `settings.json` confines Bash only and cannot supply this boundary.
+On macOS, the OS boundary uses `sandbox-exec`; execution is refused when required
+OS capabilities or certified descendant cleanup are unavailable.
+
+Auth uses the subscription token in `CLAUDE_CODE_OAUTH_TOKEN` (the runner does
+**not** pass `--bare`, which would ignore the token). The candidate region is
+injected statelessly through `--append-system-prompt-file`, so the user's real
+CLAUDE.md is never read or written during validation — only `--apply` writes it.
 
 The verdict is **compound**: Layer 1 is the same `expected_tools` / `forbidden_tools` membership rule as the closed-loop tool path; Layer 2 is an LLM judge that scores each `memory(action=add|replace)` call's content against the task's `expected_save_content` rubric (only tasks that declare a rubric are Layer-2 judged). A task may also assert an **action-level** verdict — set `expected_action`, `target_skill`, and `stale_token` (with a `skills_src` skill seeded into the sandbox) and the task passes only when the agent calls `skill_manage(action=patch|edit)` on the target skill and the patch actually touches the stale token. This is what makes discipline sections like `SKILLS_GUIDANCE` (proactively patch a stale skill) scorable. The candidate is spliced in for the duration of the run and the file is restored byte-for-byte afterward, reusing the tool-path backup + flock + checksum-drift machinery.
 
@@ -275,10 +294,16 @@ Repairs one broken tool from a failing test in a throwaway worktree, behind the 
 - `--min-retain-ratio <f>` — reject a rewrite shrinking below this fraction (default 0.8).
 - `--benchmark-cmd <cmd>` — full-suite floor run once at deploy (receives `WORKTREE_PATH`, `EVOLVED_PATH`, `RUN_DIR`, `TARGET_NAME`, `ARTIFACT_TYPE`).
 - `--create-pr` / `--pr-base-branch` / `--pr-draft` — open an opt-in **draft** human-review PR on deploy (never auto-merges).
-- `--require-sandbox` / `--allow-unconfined` — refuse to run tests unless the OS can confine writes to the run dir (default: allow). Also on `campaign` and the gaming audit.
+- `--require-sandbox` / `--allow-unconfined` — require enforceable capabilities for authoritative repair execution (default: require). Explicit unconfined runs are diagnostic and cannot authorize deployment. Campaign and gaming-audit execution follow the same policy; monitor attempts cannot bypass it.
 - `--output-dir <path>` — default `output/code/<tool-stem>/<timestamp>`.
 
-**Test-execution containment.** Tests run against LLM-modified source, so where the platform supports it (macOS `sandbox-exec`) their writes are confined to the run dir and the OS temp roots — enough to keep candidate code out of your checkout and home dir, not isolation (reads and network are unrestricted). Elsewhere runs proceed unconfined and say so: the posture lands in `repair_trace.json` and in `campaign_report.json`. `--require-sandbox` turns an unavailable sandbox into a startup refusal instead. A confined run that exits with a non-pytest status is reported as a containment failure rather than a test result, so a sandbox that fails to start can never read as "no failures".
+**Execution containment.** Setup, authority imports, tests, benchmarks, and monitor
+attempts use capability-tested containment, fresh allowlisted environments, and
+bounded descendant cleanup. Linux uses Bubblewrap; macOS uses the OS adapter when
+it can enforce the requested guarantees. Repository execution is offline and has
+no provider credentials. Unsupported policies refuse execution. Deployment needs
+structured completion evidence and checked Git scope, not a sandbox boolean or
+an empty parsed failure set. See the [gate prerequisites](reference/execution-contracts.md#gate-acceptance).
 
 Outputs `gate_decision.json` + `repair_trace.json` (rounds + final diff). **Measurement campaign:** `python -m evolution.code.campaign --repo <r> --max-organisms N [--seeds 3] [--max-cost-usd C]` harvests organisms and runs the loop at scale with a Wilson futility-stop, writing `campaign_ledger.jsonl` + `campaign_report.json`.
 

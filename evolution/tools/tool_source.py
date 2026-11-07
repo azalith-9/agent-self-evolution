@@ -11,13 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
+
+from evolution.core.paths import contained_relative, read_contained, write_contained
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +67,13 @@ class ToolEntry:
                 f"tool entry {data['name']!r} missing required field 'description'"
             )
         name = data["name"]
-        if not _TOOL_NAME_RE.match(name):
+        if not isinstance(name, str) or not _TOOL_NAME_RE.fullmatch(name):
             raise ValueError(
                 f"tool name {name!r} uses characters outside [a-zA-Z0-9_-]; "
                 f"rename before evolving (sentinel parsing depends on safe names)"
             )
+        if not isinstance(data["description"], str) or not isinstance(data.get("inputSchema", {}), dict):
+            raise ValueError("tool description must be a string and inputSchema must be an object")
         return cls(
             name=name,
             description=data["description"],
@@ -112,7 +113,13 @@ class ToolManifest:
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"manifest file not found: {path}")
-        data = json.loads(path.read_text())
+        return cls.from_json_bytes(read_contained(path.parent, path.name))
+
+    @classmethod
+    def from_json_bytes(cls, content: bytes) -> "ToolManifest":
+        data = json.loads(content)
+        if not isinstance(data, dict) or not isinstance(data.get("tools", []), list):
+            raise ValueError("manifest must be an object containing a tool list")
         tools = tuple(ToolEntry.from_dict(t) for t in data.get("tools", []))
         metadata = data.get("_evolution_metadata", {})
         confusable = metadata.get("confusable_neighbors", {})
@@ -201,12 +208,11 @@ class MCPManifestSource:
         return candidate.is_file() and candidate.suffix == ".json"
 
     def find_manifest(self, path: str | Path) -> ToolManifest | None:
-        candidate = Path(path)
-        if not candidate.is_absolute():
-            candidate = self.root / candidate
+        relative = contained_relative(self.root, path)
+        candidate = self.root / relative
         if not candidate.is_file():
             return None
-        return ToolManifest.from_json_file(candidate)
+        return ToolManifest.from_json_bytes(read_contained(self.root, relative))
 
     def apply_evolved(
         self,
@@ -234,25 +240,15 @@ class MCPManifestSource:
             )
             return
 
-        source = json.loads(source_path.read_text())
+        relative = contained_relative(self.root, source_path)
+        source = json.loads(read_contained(self.root, relative))
         for entry in source.get("tools", []):
             if entry.get("name") == target_tool:
                 entry["description"] = new_description
                 break
 
         new_text = json.dumps(source, indent=2) + "\n"
-        fd, tmp_name = tempfile.mkstemp(dir=source_path.parent, suffix=source_path.suffix)
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(new_text)
-            # mkstemp creates files with mode 0600; copy the original mode
-            # so atomic replace doesn't clobber the source file's perms.
-            shutil.copymode(source_path, tmp_path)
-            os.replace(tmp_path, source_path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        write_contained(self.root, relative, new_text.encode("utf-8"))
 
 
 def discover_tool_sources(explicit_dirs: list[Path] | None = None) -> list[ToolSource]:

@@ -2,6 +2,12 @@
 
 Step-by-step traces of the framework's main flows.
 
+Repository execution across these flows follows the [execution safety model](concepts/execution-safety.md)
+and [completion contracts](reference/execution-contracts.md). For local operation,
+see [contained repairs](howto/run-contained-repairs.md), the
+[offline fixture tutorial](tutorials/validate-task-fixtures.md), and
+[local remediation delivery](howto/review-local-remediation.md).
+
 ## Workflow 1: Evolve a skill (synthetic dataset, deploy path)
 
 The standard happy path. Broken into four phases for legibility — see [architecture.md](architecture.md) for the top-level flowchart that ties them together.
@@ -344,7 +350,13 @@ Tests are organized:
 - `tests/tools/` — cross_tool_regression, evolve_tool_closed_loop, evolve_tool_v2_acceptance (integration test: `DspyAdapter.evaluate` arithmetic on a hand-built minibatch with mixed judge + behavioral examples), evolve_tool_validation_flow, hermes_source, session_mining, tool_judge, tool_module, tool_module_behavioral
 - `tests/validation/` — artifact_installer, closed_loop_cli, hermes_runner, report, safety, task, validator
 
-All tests use mocks for LM calls — no real API keys required. The `_skill_source_env` autouse fixture (in tests that touch `EvolutionConfig`) sets `SKILL_SOURCES_HERMES_REPO` to a `tmp_path` fake repo so discovery doesn't pick up the developer's real `~/.hermes` install. Closed-loop tests use a `FakeCache` that maps `(candidate_text, task_id) → bool` directly, bypassing the validator — and `dspy.utils.DummyLM` for any LM the adapter would otherwise invoke.
+All tests use mocks for LM calls — no real API keys required. Central fixtures
+isolate provider configuration and authentication loading, while source discovery
+uses synthetic roots. A developer's Hermes configuration cannot select a live
+provider; no global `Path.home()` patch is required. Closed-loop tests use fake
+caches and `dspy.utils.DummyLM` without launching real agents. Long verification
+runs use detached execution with private logs and exit-status artifacts; every
+manual tmux command specifies its private socket.
 
 ## Workflow 9: Evolve a tool description (deploy path)
 
@@ -609,6 +621,11 @@ sequenceDiagram
 
 The `closed_loop_scorer` is the spine of behavioral scoring: `score(task_id, candidate_text)` splices the candidate into the live `prompt_builder.py` **only when it changes** (consecutive tasks for the same candidate reuse the live splice), runs the task via `hermes -z`, and reads the session back from the sandbox `state.db`. The splice+run is serialized under one `threading.Lock` because `dspy.Evaluate` scores with a thread pool but the spliced file is a single shared mutable resource — behavioral scoring is therefore effectively serial, an accepted v1 cost. The explicit `dspy.configure` is load-bearing: `dspy.context` inside the saturation pre-flight does **not** propagate into GEPA's worker threads, so without the global LM the passthrough predictor raises "No LM is loaded" → no trajectories → no proposal.
 
+Reusing a splice or cached verdict still verifies the installed artifact before
+each task. Parsing offsets and writing a prompt use a single byte snapshot.
+Feedback updates are synchronized without recursive-lock deadlocks, and aborts
+preserve a decision and available partial progress before propagating the error.
+
 ### Phase C — Inside the guard: saturation pre-flight, then GEPA
 
 ```mermaid
@@ -712,7 +729,13 @@ both Hermes and Claude prompt backends.
 The `--target claude` analog of Workflow 12. Same purely-behavioral shape — seed a region → GEPA with per-candidate injection → behavioral scoring → closed-loop deploy gate → `--apply` — but against `claude -p` instead of `hermes -z`. The agnostic core (GEPA, `ClosedLoopValidator`, `score_task`) is shared; the backend is three adapters (`ClaudeCodeAgentRunner`, `ClaudeCodePromptSource`, `ClaudeAppendPromptInstaller`). Three structural contrasts with the Hermes prompt path:
 
 - **The evolved section is a CLAUDE.md region**, delimited by `<!-- evolve:NAME start -->` … `<!-- evolve:NAME end -->`, not a `prompt_builder.py` constant. The seed region is read via `ClaudeCodePromptSource.read`.
-- **Validation never touches the user's CLAUDE.md.** Each candidate is written to a throwaway `append_system_prompt.txt` (`ClaudeAppendPromptInstaller`) that `claude -p` reads via `--append-system-prompt-file`. The agent also runs hermetically — fresh tmp `HOME` (no ambient `~/.claude` config), an OS `sandbox` confining writes to the fixture dir, `--strict-mcp-config`, `--no-session-persistence`. The real CLAUDE.md is read once (to seed) and written once (on `--apply`); never during scoring.
+- **Validation never touches the user's CLAUDE.md.** Each candidate is written to
+  a throwaway `append_system_prompt.txt` (`ClaudeAppendPromptInstaller`) that
+  `claude -p` reads via `--append-system-prompt-file`. A private `HOME`, allowlisted
+  environment, `--strict-mcp-config`, and `--no-session-persistence` accompany
+  capability-tested OS containment. Unavailable required capabilities cause
+  refusal. The real CLAUDE.md seeds the candidate and is written only on `--apply`,
+  never during scoring.
 - **The verdict is convention adherence**, not memory-content judging. A task is `expected_action:"convention"`: pass iff a `Bash` call used the repo wrapper (`required_cmd_substr`) and none bypassed it with the default tool (`forbidden_cmd_substr`). No LLM judge.
 
 ```bash
@@ -784,6 +807,7 @@ sequenceDiagram
     participant P as proposer LM
     participant F as freeze_check
     participant G as run_code_gate
+    participant V as deployment_evidence
 
     CLI->>W: create(repo, base_ref) — detached worktree + editable venv
     W->>W: assert_authoritative(tools) — package resolves only from worktree (else abort)
@@ -802,18 +826,35 @@ sequenceDiagram
     end
     Eng-->>CLI: RepairResult(fixed, rounds)
     CLI->>G: run_code_gate(env, tool, visible, holdout, floor_paths)
-    G->>W: freeze → file scope → run_test(holdout) → regression floor (repaired vs base)
-    Note over G,W: recheck file scope immediately after each test subprocess
-    G-->>CLI: CodeGateResult(deploy | reject)
-    alt deploy
-        CLI->>CLI: write gate_decision.json + repair_trace.json (+ optional draft PR)
+    G->>W: capture protected snapshot, trusted inputs and reviewed checks
+    G->>W: freeze → file scope → run_test(holdout) → comparable regression floor
+    Note over G,W: recheck scope and snapshot after every subprocess
+    G->>V: independently verify protected execution and semantic evidence
+    V-->>G: accepted | rejected | unverifiable
+    G-->>CLI: CodeGateResult(deploy | reject), retaining diagnostics
+    CLI->>CLI: write gate_decision.json + repair_trace.json
+    alt accepted verification and final integrity holds
+        CLI->>CLI: export stored snapshot bytes and mode; verify destination
+    else rejected or independent proof unavailable
+        Note over CLI: refuse deployment; preserve diagnostic results
     end
 ```
 
 The **held-out test must differ from the visible test** — that frozen split the proposer never saw is the anti-gaming core (a fix that hard-codes the visible test's expected value fails it). The **measurement campaign** (`python -m evolution.code.campaign`) swaps this held-out split for the upstream fix-commit's full test set plus an oracle match, harvests many organisms, and aggregates them cluster-honestly with a Wilson futility-stop — see `campaign_report.json` and the code-path `gate_decision.json` in [data_models.md](data_models.md).
 
+Both code gates call the same internal verifier. Cooperative pytest records and
+successful supervisor completion are diagnostic observations; they cannot prove
+required assertion semantics independently. Missing proof yields
+`independent_test_verification_unavailable`, with no deployment override. Required
+checks are independently established; skipped, deselected, replaced, missing or
+unexecuted checks cannot qualify. See [deployment evidence](reference/deployment-evidence.md).
+
 Both code gates reject a test or other module modified during a validation
-subprocess before it can be reused in another check. Surface freezing also
+subprocess before it can be reused in another check. Protected snapshot bytes
+and modes bind evidence, scope, surface and export. Source, tests, configuration,
+runtime and receipts are protected throughout certification, with separate scratch.
+Later benchmarks or subprocesses invalidate prior acceptance if relevant inputs
+change; final verification/export prevents concurrent mutation. Surface freezing also
 preserves each keyword-only parameter's required/optional status, rather than
 only comparing the total number of defaults.
 

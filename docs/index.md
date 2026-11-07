@@ -19,6 +19,7 @@ readers to the source for exact behavior.
 | **How a tool-description run works end-to-end** | `workflows.md` (Workflow 9) → `components.md` (`evolve_tool.py`) |
 | **How a prompt-section run works end-to-end** | `workflows.md` (Workflow 12) → `components.md` (`evolve_prompt_section.py`) |
 | **How a Claude CLAUDE.md convention run works** | `workflows.md` (Workflow 13) → `components.md` (Claude Code backend) |
+| **Why a green code-repair run cannot deploy** | `reference/deployment-evidence.md` → `howto/run-contained-repairs.md` |
 | **How a code-repair run works (Tier 4)** | `workflows.md` (Workflow 14) → `components.md` (`evolution/code/`) |
 | **How the triage sentinel works (Tier 5)** | `workflows.md` (Workflow 15) → `operating_the_sentinel.md` → `components.md` (`evolution/monitor/`) |
 | **What's in `triage_queue.json` / `lineage.json` / a code `gate_decision.json`** | `data_models.md` (Tier-4/5 artifacts) |
@@ -53,6 +54,25 @@ readers to the source for exact behavior.
 - **Always check `git log`** before recommending changes — the project moves fast and a memory-recalled implementation detail may have been changed in a recent PR.
 
 ## Documents in this knowledge base
+
+### Execution safety and local review
+
+- [Execution safety and trustworthy verdicts](concepts/execution-safety.md) explains
+  containment, process lifetime, authentication recovery, and the diagnostic/deploy boundary.
+- [Execution and evaluation contracts](reference/execution-contracts.md) defines
+  internal adapter obligations, environments, paths, evidence, and compatibility.
+- [Deployment evidence for code repairs](reference/deployment-evidence.md) defines
+  the planned independent verification, complete diagnostic and supervisor field
+  contracts, campaign accounting, lifecycle/replay rules, and snapshot export.
+  It specifies intended behavior without certifying the implementation.
+- [Run repairs with contained execution](howto/run-contained-repairs.md) covers
+  prerequisites, configuration, existing controls, and refusal handling.
+- [Validate a task fixture without an agent](tutorials/validate-task-fixtures.md)
+  demonstrates offline suite loading and fixture boundaries.
+- [Review and deliver a local remediation](howto/review-local-remediation.md)
+  covers checkout preservation, finding dispositions, verification, and local handoff.
+
+### Framework references
 
 | File | Purpose |
 |---|---|

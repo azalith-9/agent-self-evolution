@@ -114,17 +114,12 @@ def run_organism(
                     bug_tests=bug_tests, oracle_failures=oracle_failures,
                     base_src=parent_src, repair_result=repair,
                 )
-                seed_results.append(bool(gate.deploy))
+                diagnostic = gate.decision.get("diagnostic_comparison", {})
+                if diagnostic.get("status") not in {"passed", "failed"}:
+                    return Skip("run_inconclusive")
+                seed_results.append(diagnostic["status"] == "passed")
             except NonAuthoritativeRunError:
-                # Scored as a failed seed, not a skipped organism. The dominant
-                # case is the wider oracle scope hanging after the repair already
-                # passed its bug tests — the repair's own doing, so a wrong repair
-                # rather than an unmeasurable candidate. Skipping would drop it
-                # from the denominator and inflate deploy-reachable, the same
-                # direction as the historical bias this work removes. Note the
-                # handler also covers the bug-test re-run, where the attribution is
-                # less clear-cut; scoring False stays the conservative choice.
-                seed_results.append(False)
+                return Skip("run_inconclusive")
 
         return OrganismResult(tool=c.tool_path, fix_sha=c.fix_sha, seeds=seed_results)
     except ContainmentError:
@@ -175,9 +170,21 @@ def run_campaign(
     done: set[str] = set()
     organisms: list[OrganismResult] = []
     if ledger_path.exists():
-        for line in ledger_path.read_text().splitlines():
-            row = json.loads(line)
-            done.add(row["fix_sha"])
+        raw_ledger = ledger_path.read_bytes()
+        lines = raw_ledger.splitlines(keepends=True)
+        valid_bytes = 0
+        for index, line in enumerate(lines):
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                if index == len(lines) - 1 and not line.endswith(b"\n") and line.lstrip().startswith(b'{"status":'):
+                    with ledger_path.open("r+b") as ledger:
+                        ledger.truncate(valid_bytes)
+                    break
+                raise ValueError(f"corrupt campaign ledger record {index + 1}") from None
+            valid_bytes += len(line)
+            if row.get("status") not in {"run_inconclusive", "worktree_failed"}:
+                done.add(row["fix_sha"])
             if row.get("status") == "organism":
                 organisms.append(OrganismResult(row["tool"], row["fix_sha"], row["seeds"]))
 

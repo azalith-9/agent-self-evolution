@@ -7,7 +7,9 @@ supports it, and that a *failure* of confinement can never be mistaken for a
 test result.
 """
 
+import json
 import pathlib
+import sys
 import subprocess
 
 import pytest
@@ -40,7 +42,20 @@ def _capture(monkeypatch, *, returncode=0, stdout="1 passed", stderr=""):
 
     def fake_run(args, *, cwd, timeout, env=None):
         seen["args"] = args
-        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+        if "--evidence-path" in args:
+            path = Path(args[args.index("--evidence-path") + 1])
+            path.write_text(json.dumps({
+                "schema_version": "1", "invocation_id": env["ASE_EXECUTION_ID"],
+                "collected": 1, "deselected": 0, "collection_errors": [],
+                "session_finished": True, "exit_code": returncode,
+                "items": [{"nodeid": "tests/test_x.py::test_x", "setup": "passed",
+                           "call": "failed" if returncode == 1 else "passed",
+                           "teardown": "passed"}],
+            }))
+        result = subprocess.CompletedProcess(args, returncode, stdout, stderr)
+        result.cleanup_complete = True
+        result.invocation_id = env.get("ASE_EXECUTION_ID") if env else None
+        return result
 
     monkeypatch.setattr("evolution.code.worktree._run", fake_run)
     return seen
@@ -53,10 +68,16 @@ def test_confines_writes_to_the_run_root_when_available(tmp_path, monkeypatch):
 
     env.run_test("tests/test_x.py")
 
-    assert seen["args"][0] == "sandbox-exec"
-    profile = seen["args"][2]
-    assert f'(subpath "{env._root}")' in profile
-    assert "(deny file-write*)" in profile
+    if sys.platform.startswith("linux"):
+        assert Path(seen["args"][0]).name == "bwrap"
+        assert "--unshare-all" in seen["args"]
+        assert "--share-net" not in seen["args"]
+        assert str(env._root) in seen["args"]
+    else:
+        assert Path(seen["args"][0]).name == "sandbox-exec"
+        profile = seen["args"][2]
+        assert f'(subpath "{env._root}")' in profile
+        assert "(deny default)" in profile
     assert env.sandboxed is True
 
 
@@ -130,26 +151,19 @@ def test_containment_block_shape(tmp_path, monkeypatch):
 
     block = env.containment()
 
-    assert set(block) == {"sandboxed", "mechanism", "platform"}
+    assert set(block) == {"sandboxed", "mechanism", "platform", "network"}
     assert block["mechanism"] is None
 
 
 @pytest.mark.skipif(
-    not sandbox_available(), reason="OS filesystem confinement is macOS-only"
+    not sandbox_available(), reason="native containment unavailable"
 )
 def test_confinement_actually_denies_a_write_outside_the_root(tmp_path):
-    """Proof by denied write, not by argv inspection.
-
-    Every other test here checks the argv we *build*. This one runs a real
-    confined process and asserts the kernel refuses it. The target must be a
-    NON-temp path: the profile blanket-allows the temp roots, and the run root
-    lives under one of them, so choosing a temp path here would pass while
-    proving nothing.
-    """
+    """Denied writes use synthetic paths outside the named writable root."""
     root = tmp_path / "run"
     root.mkdir()
     outside = tmp_path / "outside.txt"   # outside the root, but still under a temp root
-    forbidden = Path.home() / ".containment_probe_should_not_exist"
+    forbidden = tmp_path / "forbidden"
 
     argv, sandboxed = wrap_argv(
         ["/bin/sh", "-c", f'echo denied > "{forbidden}"'],
@@ -174,18 +188,12 @@ def test_confinement_actually_denies_a_write_outside_the_root(tmp_path):
     assert subprocess.run(argv_ok, capture_output=True, text=True, timeout=30).returncode == 0
     assert inside.read_text().strip() == "ok"
 
-    # And the boundary this profile really draws: a path outside the declared root
-    # but still under a temp root is ALLOWED, because the temp roots are blanket
-    # -allowed. This is why the denial above had to target a non-temp path -- and
-    # why the recorded posture says "non-temp writes denied", not "isolated".
+    # Temporary paths outside the declared root have no special write grant.
     argv_temp, _ = wrap_argv(
         ["/bin/sh", "-c", f'echo leaked > "{outside}"'], write_roots=[root], require=True
     )
     subprocess.run(argv_temp, capture_output=True, text=True, timeout=30)
-    assert outside.exists(), (
-        "a temp-root write should be permitted; if this ever fails the profile "
-        "changed and the posture wording needs revisiting"
-    )
+    assert not outside.exists(), "undeclared temporary paths must also be denied"
 
 
 class TestPostureIsRecorded:
@@ -368,7 +376,7 @@ class TestProfileConstruction:
         """
         from evolution.core.sandbox import macos_write_sandbox_profile
 
-        with pytest.raises(ValueError, match="cannot escape"):
+        with pytest.raises(ValueError, match="sandbox paths"):
             macos_write_sandbox_profile([Path(hostile)])
 
 

@@ -30,18 +30,28 @@ foreclose both:
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from rich.console import Console
 
+from evolution.core.execution import ExecutionPolicy, ExecutionRequest
+from evolution.core.process import run_process
+from evolution.core.paths import read_contained, write_contained
+from evolution.code.test_evidence import read_test_evidence
+
 from evolution.core.sandbox import (
     SandboxUnavailableError,
     sandbox_available,
+    runtime_read_roots,
     wrap_argv,
 )
 
@@ -50,7 +60,7 @@ from evolution.core.sandbox import (
 # CPython's (mtime, size) .pyc invalidation and silently runs stale bytecode.
 # Disabling bytecode writes forces recompilation from source every run — and
 # keeps __pycache__ out of the worktree so it never dirties git status.
-_NO_BYTECODE_ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = 120
 _VENV_TIMEOUT = 600
@@ -77,26 +87,63 @@ class TestRun:
     output: str  # combined stdout+stderr tail
     duration_seconds: float
     exit_code: int | None = None
+    evidence_complete: bool | None = None
+    cleanup_complete: bool | None = None
+    failures: frozenset[str] | None = None
+    invocation_id: str | None = None
+
+    selected: frozenset[str] = frozenset()
+    skipped: frozenset[str] = frozenset()
+    missing: frozenset[str] = frozenset()
+    trusted_inputs_id: str | None = None
+    unexecuted: frozenset[str] = frozenset()
+
+    @property
+    def diagnostic_complete(self) -> bool:
+        return (self.evidence_complete is True and self.cleanup_complete is True
+                and type(self.exit_code) is int and self.exit_code in (0, 1) and self.failures is not None
+                and bool(self.invocation_id)
+                and self.passed == (self.exit_code == 0)
+                and bool(self.failures) == (self.exit_code == 1) and not self.unexecuted)
+
+    @property
+    def authoritative(self) -> bool:
+        """Compatibility alias for diagnostic completeness, never deployment authority."""
+        return self.diagnostic_complete
 
 
 def _run(
     args: list[str], *, cwd: Path, timeout: int, env: dict | None = None
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args, cwd=str(cwd), capture_output=True, text=True, timeout=timeout, env=env
+    child_env = env if env is not None else {
+        "PATH": os.defpath, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_TERMINAL_PROMPT": "0", "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    request = ExecutionRequest(
+        argv=args, cwd=cwd.resolve(), env=child_env,
+        policy=ExecutionPolicy(read_roots=(), write_roots=(), required=False),
+        timeout_seconds=timeout, cleanup_timeout_seconds=2,
+        invocation_id=child_env.get("ASE_EXECUTION_ID", uuid.uuid4().hex),
     )
+    result = run_process(request)
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(args, timeout, result.stdout, result.stderr)
+    if result.exit_code is None:
+        raise WorktreeError(f"process launch failed: {result.error}")
+    if not result.cleanup_complete:
+        raise WorktreeError(f"process cleanup could not be verified: {result.error}")
+    completed = subprocess.CompletedProcess(args, result.exit_code, result.stdout, result.stderr)
+    completed.cleanup_complete = result.cleanup_complete
+    completed.invocation_id = result.invocation_id
+    return completed
+
 
 
 def prune_orphan_worktrees(repo_root: Path) -> int:
-    """Remove leftover ``evolve_code_*`` worktrees and dead registrations.
+    """Remove only worktrees with a verifiably dead recorded owner.
 
-    A worktree's ``finally``/``destroy`` cleanup cannot run if the process is
-    hard-killed (SIGKILL, an interrupted background run), which leaks the worktree
-    dir + its git registration. Calling this at the start of a run self-heals
-    those orphans. Scoped to the ``evolve_code_`` mkdtemp prefix, so it never
-    touches a user's real worktree — but it assumes runs are serial (a single
-    user); it does not distinguish a concurrent run's live worktree from a dead
-    orphan, so don't run two campaigns against the same repo at once.
+    Unknown ownership is retained: a name prefix cannot distinguish a live
+    concurrent repair from an orphan.
     """
     removed = 0
     res = _run(["git", "worktree", "list", "--porcelain"], cwd=repo_root, timeout=_GIT_TIMEOUT)
@@ -106,6 +153,18 @@ def prune_orphan_worktrees(repo_root: Path) -> int:
         wt = Path(line[len("worktree "):].strip())
         root = wt.parent
         if root.name.startswith("evolve_code_") and wt.name == "wt":
+            try:
+                owner = json.loads((root / "owner.json").read_text())
+                pid = owner["pid"]
+                if type(pid) is not int or pid < 1:
+                    continue
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            except (OSError, ValueError, KeyError, TypeError):
+                continue
+            else:
+                continue
             _run(["git", "worktree", "remove", "--force", str(wt)],
                  cwd=repo_root, timeout=_GIT_TIMEOUT)
             shutil.rmtree(root, ignore_errors=True)
@@ -167,7 +226,7 @@ class WorktreeEnv:
 
     def __init__(
         self, repo_root: Path, root: Path, worktree: Path, venv: Path,
-        *, require_sandbox: bool = False,
+        *, require_sandbox: bool = True,
     ):
         self.repo_root = repo_root
         self._root = root  # the run tempdir holding both worktree and venv
@@ -178,6 +237,7 @@ class WorktreeEnv:
         self._output_tail_bytes = 6000
         self._base_python = sys.executable
         self._dep_sites: list[str] = []
+        self._git_pointer: bytes | None = None
 
     # -- construction ------------------------------------------------------
 
@@ -189,7 +249,7 @@ class WorktreeEnv:
         base_ref: str,
         base_python: str | None = None,
         output_tail_bytes: int = 6000,
-        require_sandbox: bool = False,
+        require_sandbox: bool = True,
     ) -> "WorktreeEnv":
         """Add a detached worktree at ``base_ref`` and build its isolated venv.
 
@@ -201,6 +261,7 @@ class WorktreeEnv:
         to the repo's own ``venv``/``.venv``, else the current interpreter.
         """
         root = Path(tempfile.mkdtemp(prefix="evolve_code_"))
+        (root / "owner.json").write_text(json.dumps({"pid": os.getpid()}))
         worktree = root / "wt"
         venv = root / "venv"
         env = cls(repo_root, root, worktree, venv, require_sandbox=require_sandbox)
@@ -219,7 +280,7 @@ class WorktreeEnv:
 
     def _add_worktree(self, base_ref: str) -> None:
         res = _run(
-            ["git", "worktree", "add", "--detach", str(self.worktree), base_ref],
+            ["git", "worktree", "add", "--no-checkout", "--detach", str(self.worktree), base_ref],
             cwd=self.repo_root,
             timeout=_GIT_TIMEOUT,
         )
@@ -227,6 +288,17 @@ class WorktreeEnv:
             raise WorktreeError(
                 f"git worktree add failed (base_ref={base_ref!r}): {res.stderr.strip()}"
             )
+        config = _run(["git", "config", "--get-regexp", r"^(filter\..*\.(process|smudge|clean)|core\.fsmonitor)$"],
+                      cwd=self.repo_root, timeout=_GIT_TIMEOUT)
+        if config.returncode not in (0, 1):
+            raise WorktreeError("could not inspect executable Git filter configuration")
+        if config.stdout.strip():
+            raise WorktreeError("repository Git filters require a separately contained checkout")
+        checkout = _run(["git", "read-tree", "--reset", "-u", "HEAD"],
+                        cwd=self.worktree, timeout=_GIT_TIMEOUT)
+        if checkout.returncode:
+            raise WorktreeError(f"could not populate worktree: {checkout.stderr.strip()}")
+        self._git_pointer = read_contained(self.worktree, ".git")
 
     def _build_venv(self) -> None:
         # A *clean* venv (no --system-site-packages): the base interpreter is
@@ -237,20 +309,25 @@ class WorktreeEnv:
         # test time (see _test_env) — that exposes the third-party dependencies
         # *without* executing the base's editable .pth, so the original Hermes
         # finder is never installed and there is no competing `tools` import.
-        # Build isolation (pip default) supplies the setuptools backend.
+        # Offline setup requires the build backend to be preinstalled; dependency
+        # retrieval is a separate trusted preparation step.
+        argv, _ = self.confine([self._base_python, "-m", "venv", str(self.venv)])
         res = _run(
-            [self._base_python, "-m", "venv", str(self.venv)],
+            argv,
             cwd=self._root,
             timeout=_VENV_TIMEOUT,
         )
         if res.returncode != 0:
             raise WorktreeError(f"venv creation failed: {res.stderr.strip()}")
-        res = _run(
+        self._dep_sites = self._query_dep_sites()
+        argv, _ = self.confine(
             [str(self.python), "-m", "pip", "install", "-e", str(self.worktree),
-             "--no-deps", "-q"],
+             "--no-deps", "--no-build-isolation", "--no-index", "-q"])
+        res = _run(
+            argv,
             cwd=self.worktree,
             timeout=_VENV_TIMEOUT,
-            env=_NO_BYTECODE_ENV,
+            env=self._test_env(),
         )
         if res.returncode != 0:
             raise WorktreeError(
@@ -263,11 +340,10 @@ class WorktreeEnv:
         third-party deps live. Added to PYTHONPATH at test time so imports
         resolve, without running that environment's .pth files."""
         probe = "import site, json; print(json.dumps(site.getsitepackages()))"
-        res = _run([self._base_python, "-c", probe], cwd=self._root, timeout=60)
+        argv, _ = self.confine([self._base_python, "-c", probe])
+        res = _run(argv, cwd=self._root, timeout=60, env=self._test_env())
         if res.returncode != 0:
             return []
-        import json
-
         try:
             return [p for p in json.loads(res.stdout.strip() or "[]") if Path(p).is_dir()]
         except ValueError:
@@ -292,9 +368,7 @@ class WorktreeEnv:
                 "sandbox here; the posture is recorded in this run's evidence"
             )
             return
-        argv, _ = wrap_argv(
-            ["/usr/bin/true"], write_roots=[self._root], require=False, available=True
-        )
+        argv, _ = self.confine(["/usr/bin/true"])
         try:
             res = _run(argv, cwd=self._root, timeout=30)
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -316,9 +390,16 @@ class WorktreeEnv:
         silently — the flag would then promise a guarantee that path does not
         provide.
         """
+        read_roots = [*runtime_read_roots(), self._root.resolve(), Path(sys.base_prefix).resolve(),
+                      Path(self._base_python).resolve().parent.parent,
+                      Path(__file__).resolve().parent,
+                      *[Path(path).resolve() for path in self._dep_sites]]
+        write_roots = [self._root.resolve()]
+        if self.worktree.exists():
+            write_roots.append(self.worktree.resolve())
         return wrap_argv(
-            argv, write_roots=[self._root], require=self.require_sandbox,
-            available=self.sandboxed,
+            argv, write_roots=write_roots, read_roots=read_roots,
+            network="deny", require=self.require_sandbox, available=self.sandboxed,
         )
 
     def containment(self) -> dict:
@@ -332,18 +413,24 @@ class WorktreeEnv:
         """
         return {
             "sandboxed": self.sandboxed,
-            "mechanism": "sandbox-exec" if self.sandboxed else None,
+            "mechanism": (("bubblewrap" if sys.platform.startswith("linux") else "sandbox-exec")
+                          if self.sandboxed else None),
+            "network": "deny" if self.sandboxed else "unrestricted",
             "platform": sys.platform,
         }
 
     def _test_env(self) -> dict:
         """Env for in-worktree python runs: no bytecode writes, plus the base
         interpreter's site-packages on PYTHONPATH for third-party deps."""
-        existing = os.environ.get("PYTHONPATH", "")
-        parts = [*self._dep_sites, existing] if existing else list(self._dep_sites)
-        env = dict(_NO_BYTECODE_ENV)
-        if parts:
-            env["PYTHONPATH"] = os.pathsep.join(parts)
+        home = self._root / "home"
+        temporary = self._root / "tmp"
+        for directory in (home, temporary):
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        env = {"PATH": os.defpath, "HOME": str(home), "TMPDIR": str(temporary),
+               "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1",
+               "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PIP_NO_INDEX": "1"}
+        if self._dep_sites:
+            env["PYTHONPATH"] = os.pathsep.join(self._dep_sites)
         return env
 
     # -- properties --------------------------------------------------------
@@ -372,20 +459,21 @@ class WorktreeEnv:
             f"paths = [getattr(_m, '__file__', None)] + list(getattr(_m, '__path__', []))\n"
             f"sys.stdout.write(json.dumps([os.path.realpath(p) for p in paths if p]))\n"
         )
-        res = _run([str(self.python), "-c", probe], cwd=self.worktree, timeout=60,
-                   env=self._test_env())
+        if not package.isidentifier():
+            raise WorktreeError("authority package must be a top-level Python identifier")
+        argv, _ = self.confine([str(self.python), "-c", probe])
+        res = _run(argv, cwd=self.worktree, timeout=60, env=self._test_env())
         if res.returncode != 0:
             raise WorktreeError(
                 f"could not import '{package}' in the isolated venv: {res.stderr.strip()}"
             )
-        import json as _json
-
         try:
-            resolved = _json.loads(res.stdout.strip() or "[]")
+            resolved = json.loads(res.stdout.strip() or "[]")
         except ValueError:
             resolved = []
         wt_real = str(Path(self.worktree).resolve())
-        outside = [p for p in resolved if not p.startswith(wt_real)]
+        outside = [p for p in resolved if not isinstance(p, str)
+                   or not Path(p).resolve().is_relative_to(Path(wt_real))]
         if not resolved or outside:
             raise WorktreeError(
                 f"isolation breach: '{package}' resolved to {resolved!r} "
@@ -396,17 +484,31 @@ class WorktreeEnv:
     # -- mutation + measurement -------------------------------------------
 
     def read_tool(self, relpath: str) -> str:
-        return (self.worktree / relpath).read_text()
+        return read_contained(self.worktree, relpath).decode("utf-8")
 
     def write_tool(self, relpath: str, src: str) -> None:
         """Write ``src`` to ``relpath`` in the worktree. Only tool source is
         ever written by the loop; test files are read-only (the gate verifies
         the test split was untouched against the worktree's git diff)."""
-        (self.worktree / relpath).write_text(src)
+        write_contained(self.worktree, relpath, src.encode("utf-8"))
+
+    def assert_git_metadata(self) -> None:
+        """Refuse candidate replacement of the worktree administration pointer."""
+        if self._git_pointer is not None:
+            try:
+                current = read_contained(self.worktree, ".git")
+            except (OSError, ValueError) as exc:
+                raise WorktreeError("worktree Git administration pointer is unavailable") from exc
+            if current != self._git_pointer:
+                raise WorktreeError("worktree Git administration pointer changed")
 
     def diff(self) -> str:
         """The worktree's working-tree diff against its base (what a PR ships)."""
-        res = _run(["git", "diff"], cwd=self.worktree, timeout=_GIT_TIMEOUT)
+        self.assert_git_metadata()
+        res = _run(["git", "diff", "--no-ext-diff", "--no-textconv"],
+                   cwd=self.worktree, timeout=_GIT_TIMEOUT)
+        if res.returncode != 0:
+            raise WorktreeError(f"git diff failed: {res.stderr.strip()}")
         return res.stdout
 
     def changed_files(self) -> list[str]:
@@ -414,22 +516,28 @@ class WorktreeEnv:
         not). Build artifacts (``__pycache__``/``.pyc``/the egg-info the editable
         install drops) are not source changes and are filtered out so the gate's
         file-scope check sees only what a PR would actually ship."""
+        self.assert_git_metadata()
         res = _run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=self.worktree,
-            timeout=_GIT_TIMEOUT,
+            ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            cwd=self.worktree, timeout=_GIT_TIMEOUT,
         )
+        if res.returncode != 0:
+            raise WorktreeError(f"git scope inspection failed: {res.stderr.strip()}")
+        fields = iter(res.stdout.split("\0"))
         out: list[str] = []
-        for line in res.stdout.splitlines():
-            if len(line) <= 3:
+        for field in fields:
+            if not field:
                 continue
-            path = line[3:].strip()
-            # A rename renders as "old -> new"; the destination is what ships.
-            if " -> " in path:
-                path = path.split(" -> ", 1)[1].strip()
-            if "__pycache__" in path or path.endswith((".pyc", ".egg-info", ".egg-link")):
-                continue
-            out.append(path)
+            if len(field) < 4 or field[2] != " ":
+                raise WorktreeError("malformed NUL-delimited git status")
+            paths = [field[3:]]
+            if "R" in field[:2] or "C" in field[:2]:
+                source = next(fields, None)
+                if not source:
+                    raise WorktreeError("missing rename source in git status")
+                paths.append(source)
+            out.extend(path for path in paths if "__pycache__" not in Path(path).parts
+                       and not path.endswith((".pyc", ".egg-info", ".egg-link")))
         return out
 
     def run_test(
@@ -444,16 +552,25 @@ class WorktreeEnv:
         complete set of failing test ids (e.g. the baseline-diff regression floor),
         which a tail could truncate.
         """
-        import time
-
+        invocation_id = uuid.uuid4().hex
+        evidence_dir = self._root / "evidence"
+        evidence_dir.mkdir(mode=0o700, exist_ok=True)
+        evidence_path = evidence_dir / f"{invocation_id}.json"
+        plugin = str(Path(__file__).resolve().parent)
+        child_env = self._test_env()
+        child_env["ASE_EXECUTION_ID"] = invocation_id
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            [plugin, *self._dep_sites])
         args = [
             str(self.python), "-m", "pytest", "-q", "--no-header",
-            "-p", "no:cacheprovider", *(extra_args or []), *test_paths,
+            "-p", "no:cacheprovider", "-p", "pytest_evidence_plugin",
+            "--evidence-path", str(evidence_path),
+            "--evidence-invocation-id", invocation_id, *(extra_args or []), *test_paths,
         ]
         argv, sandboxed = self.confine(args)
         start = time.monotonic()
         try:
-            res = _run(argv, cwd=self.worktree, timeout=timeout, env=self._test_env())
+            res = _run(argv, cwd=self.worktree, timeout=timeout, env=child_env)
             duration = time.monotonic() - start
             if sandboxed and res.returncode > 5:
                 # sandbox-exec exits 65 without running the child when a profile
@@ -468,8 +585,19 @@ class WorktreeEnv:
                 )
             combined = res.stdout + "\n" + res.stderr
             out = combined if full_output else combined[-self._output_tail_bytes:]
-            return TestRun(passed=res.returncode == 0, output=out,
-                           duration_seconds=duration, exit_code=res.returncode)
+            cleanup_complete = (getattr(res, "cleanup_complete", False)
+                                and getattr(res, "invocation_id", None) == invocation_id)
+            evidence = read_test_evidence(evidence_path, invocation_id=invocation_id,
+                                          exit_code=res.returncode,
+                                          cleanup_complete=cleanup_complete,
+                                          required_nodeids=tuple(p for p in test_paths if "::" in p))
+            return TestRun(passed=res.returncode == 0 and evidence.complete and not evidence.missing, output=out,
+                           duration_seconds=duration, exit_code=res.returncode,
+                           evidence_complete=evidence.complete,
+                           cleanup_complete=cleanup_complete, failures=evidence.failures,
+                           invocation_id=invocation_id, selected=evidence.selected,
+                           skipped=evidence.skipped, missing=evidence.missing, unexecuted=evidence.unexecuted,
+                           trusted_inputs_id=WorktreeEnv._diagnostic_inputs_id(self, test_paths, extra_args))
         except subprocess.TimeoutExpired as exc:
             # Keep what pytest managed to print. The last test it named before
             # hanging is the diagnostic someone chasing an introduced infinite
@@ -491,40 +619,25 @@ class WorktreeEnv:
                 exit_code=None,
             )
 
+    def _diagnostic_inputs_id(self, test_paths: tuple[str, ...], extra_args: list[str] | None) -> str:
+        """Fingerprint diagnostic selection and test bytes; this is not protection."""
+        import hashlib
+
+        digest = hashlib.sha256(repr((test_paths, extra_args)).encode())
+        for path in sorted(self.worktree.rglob("*.py")):
+            if "tests" in path.relative_to(self.worktree).parts or path.name == "conftest.py":
+                digest.update(str(path.relative_to(self.worktree)).encode())
+                digest.update(path.read_bytes())
+        return digest.hexdigest()
+
     def failing_tests(self, *test_paths: str, timeout: int = _DEFAULT_TEST_TIMEOUT) -> set[str]:
-        """Failing/erroring pytest node-ids for ``test_paths`` — the seam the oracle
-        gate uses so it never re-implements parsing (SWEbenchEnv overrides it).
-
-        Raises when the run produced **no failure evidence and no authoritative
-        exit**. That is the real invariant, and it is narrower than "the exit code
-        looks normal": an import error exits 2 while still naming the file it could
-        not import, which is a complete statement about what failed, and refusing it
-        would drop a whole class of genuine bugs from the campaign's population.
-        Conversely a zero-test run (exit 5) or a timeout names nothing, and the
-        parser returns an empty set for output it cannot read — so scoring either
-        would record "nothing failed" for a run that established nothing.
-
-        Only a clean exit 0 may return an empty set, because there it means what it
-        says.
-
-        Note this is *not* the SWE-bench env's approach, which returns an
-        unaccountable id inside the failing set so the gate rejects and the
-        instance stays in the denominator scored incorrect. Raising here removes
-        the item instead, so callers scoring a repair convert the refusal into a
-        failed seed rather than a skip — same intent, and the caller decides which
-        effect on the estimand is honest for its situation.
-        """
-        from evolution.code.gate import _parse_pytest_failures  # noqa: PLC0415
+        """Return complete invocation-bound failures, or refuse an inconclusive run."""
         run = self.run_test(*test_paths, extra_args=["--tb=no"], full_output=True, timeout=timeout)
-        if run.exit_code == 0:
-            return set()
-        failures = _parse_pytest_failures(run.output)
-        if failures:
-            return failures
+        if run.diagnostic_complete:
+            return set(run.failures)
         raise NonAuthoritativeRunError(
-            f"pytest on {list(test_paths)} exited {run.exit_code} and named no failing "
-            f"test, so it established nothing — an empty set here would read as "
-            f"'nothing failed': {run.output[-500:]}"
+            f"pytest on {list(test_paths)} exited {run.exit_code} and established nothing "
+            f"without complete execution evidence: {run.output[-500:]}"
         )
 
     # -- teardown ----------------------------------------------------------

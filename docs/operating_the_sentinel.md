@@ -76,18 +76,37 @@ python -m evolution.monitor --repo /path/to/target-repo \
 
 This reuses the validated repair loop (worktree → repair → oracle gate) on the top K
 and annotates each queue row with an `attempt` block. It still **never opens a PR** —
-it records whether the loop *could* produce an oracle-matching fix. You read the
-verdict and decide what to deploy by hand.
+it records whether the loop *could* produce an oracle-matching fix for review.
+A diagnostic success does not authorize deployment or export.
+
+**[PLANNED - Implementation Pending]** The separation below specifies intended
+accounting behavior; it does not certify the current implementation. Oracle
+`correct`/`incorrect` remain diagnostic comparison verdicts. Both gates separately
+require accepted independent verification and snapshot integrity for deployment.
+`CodeGateResult.deploy` is deployment eligibility, so campaign and sentinel seeds
+must consume diagnostic comparison outcomes rather than `gate.deploy`.
 
 Verdicts in the annotated `triage_queue.json`:
 
 | `attempt.status` | meaning |
 |------------------|---------|
-| `attempted` (+ `correct_seeds`/`seeds`, `deploy_reachable`) | the loop ran; `deploy_reachable: true` means a majority of seeds produced an oracle-matching fix |
+| `attempted` (+ `correct_seeds`/`seeds`, `deploy_reachable`) | all requested seeds were measured; `correct_seeds` counts diagnostic comparison passes; `deploy_reachable` requires at least one pass and `2 * correct_seeds >= seeds` (two of three by default) |
 | `not_valid` | the parent doesn't cleanly fail what the fix passes — not a clean single-tool bug |
 | `source_missing` / `too_large` / `worktree_failed` | skipped before repair (source gone, too big for a whole-file rewrite, or isolation setup failed) |
-| `run_inconclusive` | a pytest run established nothing (hang, kill, nothing collected), so the candidate could not be measured — deliberately distinct from `not_valid`, which is a real verdict |
+| `run_inconclusive` | required diagnostic observations were incomplete (for example a hang, collection failure, or unknown cleanup); retain seed identity, reason and completed observations for resumption rather than declaring a failed repair |
 | `cost_ceiling` | the `--max-cost-usd` cap was hit; remaining candidates were not attempted |
+
+Independent verification can refuse deployment with
+`independent_test_verification_unavailable` even when every diagnostic comparison
+passes. Preserve those successful seeds and the organism's diagnostic denominator;
+missing independent proof alone is neither `incorrect` nor `run_inconclusive`.
+A demonstrated diagnostic failure remains a failed seed. If diagnostic measurement
+itself is unavailable, do not coerce it to false or report a partial set as a
+completed attempt. Report requested, measured, and inconclusive counts separately
+and resume only outstanding seeds with fresh invocation identities. Reusing queue
+observations restores accounting only, never deployment authority. See the
+[canonical comparison and campaign contract](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting)
+and [artifact fields](data_models.md#campaign_ledgerjsonl--campaign_reportjson).
 
 `--max-cost-usd` is **required** whenever `--attempt-top > 0` (the CLI refuses to run
 the repair loop uncapped) and is a hard ceiling: the run aborts cleanly with a partial,

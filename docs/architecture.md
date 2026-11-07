@@ -1,5 +1,10 @@
 # Architecture
 
+For repository execution, see [execution safety and trustworthy verdicts](concepts/execution-safety.md).
+Its trust boundaries cover setup, imports, tests, benchmarks, validation, and
+monitor attempts; the [contract reference](reference/execution-contracts.md)
+defines the evidence required before a deployment comparison is authoritative.
+
 ## One-line model
 
 A SKILL.md body or a tool description is wrapped as a `dspy.Module`; GEPA mutates the module's instruction text using execution-trace feedback; candidates are scored by an LLM-as-judge; the winning candidate has to clear a paired-bootstrap quality gate on a held-out split before it's accepted. An orthogonal closed-loop validation surface runs a real agent against a JSONL task suite to compare baseline vs evolved behavior — either as a post-gate veto, as a reflection-LM feedback enricher during evolution, or as a score channel that contributes to GEPA's minibatch acceptance.
@@ -194,11 +199,18 @@ Both backends feed the **same** agnostic GEPA + `ClosedLoopValidator` + `score_t
 `BudgetAwareProposer` (`evolution/skills/budget_aware_proposer.py`) implements GEPA's `ProposalFn` protocol. It supplies a reflection signature with a length budget baked into every proposal. The framework retains DSPy's `instruction_proposer` extension point for skills, tools, and prompt sections so character budgets and sentinel guards remain active with released GEPA. See [dependencies.md](dependencies.md) for the supported versions.
 
 ### 4. Paired-bootstrap deploy gate
-`paired_bootstrap()` (`evolution/core/stats.py`) runs the basic (reverse-percentile) bootstrap on per-example improvement vectors. The gate (`ConstraintValidator._check_growth_with_quality_gate`) requires both:
-- Sample mean ≥ continuous required threshold (zero below `growth_free_threshold`)
-- Bootstrap lower bound > 0 (no-regression)
+`paired_bootstrap()` (`evolution/core/stats.py`) computes percentile intervals of resampled mean per-example improvement vectors. It does not use reverse-percentile or BCa intervals. The gate (`ConstraintValidator._check_growth_with_quality_gate`) selects a rule based on the continuous required improvement and `gate_mode`:
 
-When growth is below the free threshold, the gate degrades to "no-regression only" (mean ≥ 0) — the optimizer doesn't need to justify a shorter artifact.
+| Condition | Decision rule | Pass requirement |
+|---|---|---|
+| `required_improvement > 0` | `dual_check` | `bootstrap.mean >= required_improvement` and `bootstrap.lower_bound > 0` |
+| `required_improvement == 0` and `gate_mode == "no_regression"` | `no_regression_only` | `bootstrap.mean >= 0` |
+| `required_improvement == 0` and `gate_mode == "non_inferiority"` | `non_inferiority` | `bootstrap.lower_bound > -inferiority_tolerance` |
+
+Growth at or below `growth_free_threshold`, including compression, requires zero
+improvement. That branch uses the configured gate mode; positive required
+improvement always uses `dual_check`. See the
+[gate-decision schema](data_models.md#growth-quality-gate-variant-deploy-or-reject) for persisted rules.
 
 ### 5. Candidate selection (static-validation, optional parsimony)
 `select_knee_point()` (`evolution/skills/knee_point.py:48`) consumes `DspyGEPAResult.candidates` + `val_aggregate_scores`. The default `val-best` path returns GEPA's argmax candidate after static-validating it (size/structure), falling back to GEPA's next choice if it fails — calibration found the ε-band walk re-picks argmax at this scale, so the default skips it ([reports/calibration_findings.md](../reports/calibration_findings.md)). The opt-in `--knee-point-strategy smallest` walks the ε = 1/n_val band by ascending body size for explicit compression at iso-quality.

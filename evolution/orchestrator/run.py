@@ -18,10 +18,13 @@ import json
 import logging
 import os
 import shutil
-import subprocess
+import sys
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from evolution.core.execution import ExecutionPolicy, ExecutionRequest
+from evolution.core.process import run_process
 from evolution.orchestrator.adapters import PHASE_ADAPTERS
 from evolution.orchestrator.history import (
     LEDGER_NAME,
@@ -52,10 +55,32 @@ def default_phase_runner(argv: list[str], *, env: dict, cwd: Path, timeout: floa
     SystemExit, or cost-ceiling abort is just a non-zero code here — it cannot
     take down the orchestrator. A wedged phase is killed at ``timeout`` seconds
     and reported as exit 124 (no gate written → reconciles to ``failed``)."""
-    try:
-        return subprocess.run(argv, env=env, cwd=str(cwd), timeout=timeout).returncode
-    except subprocess.TimeoutExpired:
-        return 124  # subprocess.run kills the child before raising
+    request = ExecutionRequest(
+        argv=argv, env=env, cwd=cwd.resolve(),
+        policy=ExecutionPolicy(read_roots=(), write_roots=(), network="allow", required=False),
+        timeout_seconds=timeout if timeout is not None else 3600,
+        cleanup_timeout_seconds=3, invocation_id=uuid.uuid4().hex,
+    )
+    secrets = [value for key, value in env.items()
+               if any(part in key for part in ("TOKEN", "KEY", "SECRET", "PASSWORD"))]
+    result = run_process(request, secrets=secrets)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.timed_out:
+        return 124
+    if not result.cleanup_complete:
+        return 125
+    return result.exit_code if result.exit_code is not None else 126
+
+
+def _phase_environment() -> dict[str, str]:
+    allowed = {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "TZ",
+               "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "NOUS_API_KEY",
+               "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+               "SKILL_SOURCES_HERMES_REPO", "HERMES_HOME", "LITELLM_LOCAL_MODEL_COST_MAP"}
+    return {key: value for key, value in os.environ.items() if key in allowed}
 
 
 def read_gate(run_dir: Path) -> dict | None:
@@ -158,7 +183,7 @@ def run_pipeline(
         started_at = clock().isoformat()
         error = None
         try:
-            exit_code = phase_runner(argv, env=os.environ.copy(), cwd=cwd, timeout=phase_timeout)
+            exit_code = phase_runner(argv, env=_phase_environment(), cwd=cwd, timeout=phase_timeout)
         except Exception as exc:  # the runner itself failing != the phase failing
             exit_code, error = -1, repr(exc)
             logger.warning("orchestrator: phase_runner raised for %s/%s: %s",

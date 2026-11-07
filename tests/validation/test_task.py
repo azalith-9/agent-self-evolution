@@ -197,14 +197,14 @@ class TestActionLevelFields:
         self._write_jsonl(p, [{
             "task_id": "t1",
             "user_message": "update skill X",
-            "skills_src": "/path/to/skills",
+            "skills_src": "path/to/skills",
             "expected_action": "patch",
             "target_skill": "SKILLS_GUIDANCE",
             "stale_token": "old text",
         }])
         suite = TaskSuite.from_jsonl(p)
         t = suite.tasks[0]
-        assert t.skills_src == "/path/to/skills"
+        assert t.skills_src == "path/to/skills"
         assert t.expected_action == "patch"
         assert t.target_skill == "SKILLS_GUIDANCE"
         assert t.stale_token == "old text"

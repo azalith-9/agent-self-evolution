@@ -67,7 +67,7 @@ def synth_repo(tmp_path: Path) -> Path:
 
 class TestWorktreeEnv:
     def test_full_lifecycle(self, synth_repo: Path):
-        env = WorktreeEnv.create(synth_repo, base_ref="HEAD")
+        env = WorktreeEnv.create(synth_repo, base_ref="HEAD", require_sandbox=False)
         try:
             # Guard: the synthetic 'tools' package resolves from the worktree.
             env.assert_authoritative("tools")
@@ -90,13 +90,13 @@ class TestWorktreeEnv:
     def test_guard_trips_on_import_outside_worktree(self, synth_repo: Path):
         # 'os' is stdlib — resolves outside the worktree, so the guard must
         # refuse to trust the environment.
-        with WorktreeEnv.create(synth_repo, base_ref="HEAD") as env:
+        with WorktreeEnv.create(synth_repo, base_ref="HEAD", require_sandbox=False) as env:
             with pytest.raises(WorktreeError, match="isolation breach"):
                 env.assert_authoritative("os")
 
     def test_create_rejects_bad_ref(self, synth_repo: Path):
         with pytest.raises(WorktreeError):
-            WorktreeEnv.create(synth_repo, base_ref="no-such-ref-xyz")
+            WorktreeEnv.create(synth_repo, base_ref="no-such-ref-xyz", require_sandbox=False)
 
 
 class TestPruneOrphans:
@@ -111,6 +111,7 @@ class TestPruneOrphans:
                                  capture_output=True, text=True).stdout
         assert str(wt) in listing  # leak present
         try:
+            (root / "owner.json").write_text('{"pid": 2147483647}')
             removed = prune_orphan_worktrees(synth_repo)
             assert removed >= 1
             after = subprocess.run(["git", "-C", str(synth_repo), "worktree", "list"],

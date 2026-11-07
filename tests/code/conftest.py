@@ -11,10 +11,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-from evolution.code.worktree import TestRun
+from evolution.code.worktree import TestRun, WorktreeEnv
 
 # Mirror WorktreeEnv: no .pyc writes, so same-size rewrites between rounds don't
 # run stale bytecode (and no __pycache__ dirties the repo).
@@ -26,6 +25,11 @@ class StagedRepo:
 
     def __init__(self, root: Path):
         self.root = root
+        self._root = root.parent / (root.name + "-runtime")
+        self._root.mkdir(exist_ok=True)
+        self._dep_sites = []
+        self._output_tail_bytes = 6000
+        self.python = Path(sys.executable)
         self.worktree = root  # gate/_base_source treat this as the repo root
         (root / "tools").mkdir(parents=True, exist_ok=True)
         (root / "tests" / "tools").mkdir(parents=True, exist_ok=True)
@@ -44,18 +48,14 @@ class StagedRepo:
 
     def run_test(self, *test_paths: str, timeout: int = 120, extra_args=None,
                  full_output: bool = False) -> TestRun:
-        start = time.monotonic()
-        res = subprocess.run(
-            [sys.executable, "-m", "pytest", "-q", "--no-header",
-             "-p", "no:cacheprovider", *(extra_args or []), *test_paths],
-            cwd=str(self.root), capture_output=True, text=True, timeout=timeout,
-            env=_NO_BYTECODE_ENV,
-        )
-        combined = res.stdout + "\n" + res.stderr
-        out = combined if full_output else combined[-6000:]
-        return TestRun(passed=res.returncode == 0, output=out,
-                       duration_seconds=time.monotonic() - start,
-                       exit_code=res.returncode)
+        return WorktreeEnv.run_test(self, *test_paths, timeout=timeout,
+                                    extra_args=extra_args, full_output=full_output)
+
+    def confine(self, argv: list[str]) -> tuple[list[str], bool]:
+        return argv, False
+
+    def _test_env(self) -> dict:
+        return WorktreeEnv._test_env(self)
 
     def failing_tests(self, *node_ids: str) -> set[str]:
         """Borrow the real implementation so the double inherits its refusal.

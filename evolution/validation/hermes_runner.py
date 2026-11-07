@@ -16,17 +16,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Optional
 
 import litellm
 
+from evolution.core.execution import ExecutionPolicy, ExecutionRequest
+from evolution.core.process import run_process
 from evolution.core.lm_timing_callback import (
     COST_LEDGER,
     CostCeilingExceeded,
@@ -119,10 +121,12 @@ class HermesAgentRunner:
         user_config_path: Optional[Path] = None,
         model: Optional[str] = None,
         cost_ledger: CostLedger = COST_LEDGER,
+        require_sandbox: bool = True,
     ) -> None:
         self.hermes_command = hermes_command
         self.timeout_seconds = timeout_seconds
         self.cost_ledger = cost_ledger
+        self.require_sandbox = require_sandbox
         # If set, copied into the sandboxed HERMES_HOME so the agent picks
         # up the user's credentials. Defaults to ``~/.hermes/config.yaml``.
         self.user_config_path = (
@@ -158,28 +162,30 @@ class HermesAgentRunner:
         sandbox = Path(tempfile.mkdtemp(prefix="cl_hermes_home_"))
         try:
             self._prime_sandbox(sandbox, ctx)
-            env = {
-                **os.environ,
-                "HERMES_HOME": str(sandbox),
-                "HOME": str(sandbox),
-                **ctx.extra_env,
-            }
+            from evolution.validation.runner_environment import agent_environment, hermes_credential_keys
+
+            env = agent_environment(sandbox, ctx.extra_env, credential_keys=hermes_credential_keys(sandbox / "config.yaml"))
+            env["HERMES_HOME"] = str(sandbox)
             argv = [self.hermes_command, "-z", message]
             if self.model is not None:
                 # Insert before the -z so hermes parses it as a global flag,
                 # not as part of the -z prompt value.
                 argv = [self.hermes_command, "-m", self.model, "-z", message]
+            from evolution.validation.runner_environment import agent_read_roots
+            from evolution.core.execution import select_executable
+
+            argv[0] = select_executable(argv[0], cwd=Path(ctx.fixture_dir).resolve(), env=env) or argv[0]
+            request = ExecutionRequest(
+                argv=argv, cwd=Path(ctx.fixture_dir).resolve(), env=env,
+                policy=ExecutionPolicy(read_roots=agent_read_roots(argv[0]),
+                    write_roots=[Path(ctx.fixture_dir).resolve(), sandbox.resolve()],
+                    network="allow", required=self.require_sandbox),
+                timeout_seconds=self.timeout_seconds, cleanup_timeout_seconds=2,
+                invocation_id=uuid.uuid4().hex,
+            )
             start = time.time()
             try:
-                subprocess.run(
-                    argv,
-                    env=env,
-                    cwd=str(ctx.fixture_dir),
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_seconds,
-                    check=False,
-                )
+                proc = run_process(request)
             except subprocess.TimeoutExpired:
                 result = AgentRunResult(
                     tool_calls_seq=[],
@@ -200,7 +206,12 @@ class HermesAgentRunner:
                 # Modern hermes persists the session to a SQLite ``state.db`` in
                 # HERMES_HOME (one-shot ``-z`` no longer writes ``session_*.json``).
                 db_path = sandbox / "state.db"
-                if not db_path.is_file():
+                if proc.timed_out or not proc.cleanup_complete or proc.error:
+                    result = AgentRunResult(
+                        tool_calls_seq=[], final_text_tail="", duration_seconds=duration,
+                        error=proc.error or ("hermes -z timed out" if proc.timed_out else "hermes cleanup unverified"),
+                    )
+                elif not db_path.is_file():
                     result = AgentRunResult(
                         tool_calls_seq=[],
                         final_text_tail="",
@@ -236,7 +247,9 @@ class HermesAgentRunner:
         if ctx.skills_src is not None and ctx.skills_src.is_dir():
             # Copy (not symlink) so an in-task write by the agent corrupts
             # only this sandbox, not the installer's persistent candidate.
-            shutil.copytree(ctx.skills_src, sandbox / "skills")
+            from evolution.validation.runner_environment import copy_skills
+
+            copy_skills(Path(ctx.skills_src), sandbox / "skills")
 
 
 def parse_session_result(

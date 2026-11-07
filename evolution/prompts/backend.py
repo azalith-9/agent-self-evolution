@@ -45,9 +45,9 @@ class PromptBackend:
     baseline_text: str
     deploy_target: Path               # what --apply actually writes (for the log line)
 
-    def install_candidate(self, text: str) -> None:
+    def install_candidate(self, text: str) -> str:
         """Install a candidate for validation (inner loop) — via the installer."""
-        self.installer.install_text(text)
+        return self.installer.install_text(text)
 
     def deploy(self, section_name: str, text: str) -> None:
         """Write the evolved section to the real artifact (--apply) — via the source."""

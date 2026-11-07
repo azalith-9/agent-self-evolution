@@ -57,7 +57,8 @@ class TestOracleGate:
         repo = _repo(tmp_path)
         repo.write_tool(TOOL, FIXED)
         res = _gate(repo, _fixed(FIXED))
-        assert res.deploy, res.reason
+        assert not res.deploy
+        assert res.decision["diagnostic_comparison"]["status"] == "passed"
         assert res.decision["decision"] == "correct"
         assert res.decision["guards"]["bug_tests_passed"]
         assert res.decision["guards"]["oracle_match"]["new_vs_oracle"] == []
@@ -67,7 +68,8 @@ class TestOracleGate:
         repo = _repo(tmp_path)
         repo.write_tool(TOOL, FIXED)
         res = _gate(repo, _fixed(FIXED), floor_paths=("tests/tools",))
-        assert res.deploy, res.reason
+        assert not res.deploy
+        assert res.decision["diagnostic_comparison"]["status"] == "passed"
         assert res.decision["guards"]["floor"]["new_failures"] == []
 
     def test_regression_against_oracle_rejected(self, tmp_path):
@@ -130,7 +132,8 @@ def test_pass_to_pass_default_runs_test_relpath():
     r = run_code_oracle_gate(env, tool_relpath="m.py", test_relpath="tests/x.py",
         bug_tests=("t.py::a",), oracle_failures=frozenset(), base_src=_GOOD,
         repair_result=_rep())
-    assert r.deploy is True
+    assert not r.deploy
+    assert r.decision["diagnostic_comparison"]["status"] == "passed"
 
 
 def test_pass_to_pass_regression_rejected():
@@ -146,7 +149,8 @@ def test_pass_to_pass_envflaky_excluded():
     r = run_code_oracle_gate(env, tool_relpath="m.py", test_relpath="(swebench)",
         bug_tests=("t.py::a",), oracle_failures=frozenset({"p::flaky"}), base_src=_GOOD,
         repair_result=_rep(), pass_to_pass=("p::flaky",))
-    assert r.deploy is True
+    assert not r.deploy
+    assert r.decision["diagnostic_comparison"]["status"] == "passed"
 
 
 @pytest.mark.parametrize("mutation_stage", ["bug", "oracle", "repaired_floor", "base_floor"])

@@ -16,7 +16,9 @@ import io
 import os
 import tarfile
 import tempfile
+import shlex
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -98,7 +100,9 @@ class SWEbenchEnv:
         from swebench.harness.test_spec.test_spec import make_test_spec
 
         client = docker.from_env()
-        log_path = Path(tempfile.mktemp(prefix=f"sweb_{instance.instance_id}_", suffix=".log"))
+        fd, log_name = tempfile.mkstemp(prefix="sweb_", suffix=".log")
+        os.close(fd)
+        log_path = Path(log_name)
         spec = make_test_spec(instance.raw, namespace="swebench", arch="x86_64")
         logger = setup_logger(spec.instance_id, log_path)
         if not spec.is_remote_image:
@@ -163,6 +167,7 @@ class SWEbenchEnv:
         report["_eval_ok"] = eval_ok
         report["_timed_out"] = timed_out
 
+        report["_invocation_id"] = uuid.uuid4().hex
         self._graded = report
         return self._graded
 
@@ -197,7 +202,10 @@ class SWEbenchEnv:
         f2p_fail = set(rep["FAIL_TO_PASS"]["failure"])
         p2p_fail = set(rep["PASS_TO_PASS"]["failure"])
         all_fail = f2p_fail | p2p_fail
-        passed = not any(i in all_fail for i in ids) if ids else not all_fail
+        successes = set(rep["FAIL_TO_PASS"]["success"]) | set(rep["PASS_TO_PASS"]["success"])
+        required = set(ids) if ids else set(self._f2p) | set(self._p2p)
+        complete = bool(rep.get("_eval_ok")) and bool(required) and required <= successes | all_fail
+        passed = complete and not (required & all_fail)
 
         raw = self._last_eval_output
         # Slice to the region between sentinels so the LM sees test failures,
@@ -211,18 +219,30 @@ class SWEbenchEnv:
 
         # Best-effort exit code: 0 if passed, 1 if not.
         exit_code = 0 if passed else 1
-        return TestRun(passed=passed, output=output,
-                       duration_seconds=duration, exit_code=exit_code)
+        return TestRun(
+            passed=passed, output=output, duration_seconds=duration, exit_code=exit_code,
+            invocation_id=rep.get("_invocation_id"), evidence_complete=complete,
+            cleanup_complete=rep.get("_cleanup_complete", False),
+            failures=frozenset(required & all_fail),
+        )
 
     # -- file I/O -----------------------------------------------------------
 
     def read_tool(self, relpath: str) -> str:
         """Read a file from /testbed inside the container."""
-        _, out = _exec(self._container, f"cat /testbed/{relpath}")
+        relative = Path(relpath)
+        if relative.is_absolute() or ".." in relative.parts or not relpath:
+            raise ValueError("container tool path must be contained and relative")
+        code, out = _exec(self._container, f"cat {shlex.quote('/testbed/' + relpath)}")
+        if code != 0:
+            raise OSError(f"container read failed (exit {code})")
         return out
 
     def write_tool(self, relpath: str, src: str) -> None:
         """Write ``src`` into /testbed/``relpath`` and invalidate the verdict cache."""
+        relative = Path(relpath)
+        if relative.is_absolute() or ".." in relative.parts or not relpath:
+            raise ValueError("container tool path must be contained and relative")
         _put_file(self._container, f"/testbed/{relpath}", src)
         self._graded = None
 

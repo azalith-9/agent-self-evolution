@@ -166,7 +166,8 @@ def _failures(env: WorktreeEnv, test_relpath: str) -> set[str]:
 
 
 def validate_candidate(
-    repo: Path, c: Candidate, *, base_python: str | None = None
+    repo: Path, c: Candidate, *, base_python: str | None = None,
+    require_sandbox: bool = True,
 ) -> HarvestedBug | None:
     """Establish oracle-validity for one candidate, in the real worktree.
 
@@ -177,7 +178,8 @@ def validate_candidate(
     *both* runs and cancel out of the difference.
     """
     try:
-        env = WorktreeEnv.create(repo, base_ref=c.fix_sha, base_python=base_python)
+        env = WorktreeEnv.create(repo, base_ref=c.fix_sha, base_python=base_python,
+                                 require_sandbox=require_sandbox)
     except WorktreeError:
         return None
     try:

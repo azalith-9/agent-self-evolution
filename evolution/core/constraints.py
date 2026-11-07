@@ -167,20 +167,20 @@ class ConstraintValidator:
 
         if rule == "non_inferiority":
             tol = self.config.inferiority_tolerance
-            if lower >= -tol:
+            if lower > -tol:
                 return ConstraintResult(
                     passed=True,
                     constraint_name="growth_quality_gate",
                     message=(
                         f"Growth {growth:+.1%}: non-inferior — lower-bound "
-                        f"{lower:+.3f} ≥ -{tol:.3f} tolerance (n={n}, conf={conf:.2f})"
+                        f"{lower:+.3f} > -{tol:.3f} tolerance (n={n}, conf={conf:.2f})"
                     ),
                 )
             return ConstraintResult(
                 passed=False,
                 constraint_name="growth_quality_gate",
                 message=(
-                    f"Growth {growth:+.1%}: lower-bound {lower:+.3f} < "
+                    f"Growth {growth:+.1%}: lower-bound {lower:+.3f} ≤ "
                     f"-{tol:.3f} tolerance (n={n}, conf={conf:.2f})"
                 ),
             )

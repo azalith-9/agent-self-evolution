@@ -8,10 +8,13 @@ The default list is built by sniffing the environment: HERMES_AGENT_REPO,
 
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Literal, Optional
 
 from evolution.core.hermes_provider import ResolvedLM, Role, resolve_default_lm
 from evolution.core.skill_sources import SkillSource, discover_skill_sources
+
+
+ProposerMode = Literal["compression", "balanced", "growth"]
 
 
 @dataclass
@@ -86,8 +89,7 @@ class EvolutionConfig:
     gate_mode: str = "no_regression"
     inferiority_tolerance: float = 0.0
     fitness_profile: str = "balanced"
-    # Basic (reverse percentile) bootstrap is the literature-recommended
-    # method when N is small. BCa is the upgrade path once N≥20 routinely.
+    # Paired percentile bootstrap; confidence and resampling remain configurable.
     bootstrap_confidence: float = 0.90
     bootstrap_n_resamples: int = 2000
 
@@ -114,5 +116,3 @@ class EvolutionConfig:
     create_pr: bool = False
 
     seed: int = 42
-
-

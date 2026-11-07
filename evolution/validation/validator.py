@@ -118,7 +118,6 @@ class ClosedLoopValidator:
     def validate(self, inputs: ValidationInputs) -> ValidationReport:
         target = self.installer.target_path
         backup_path = target.with_suffix(target.suffix + _BACKUP_SUFFIX)
-        _refuse_if_stale_backup_exists(backup_path, self.installer)
 
         # A task's ``skills_src`` is resolved relative to the suite file's
         # directory; synthetic suites (no path on disk) can't resolve a
@@ -127,6 +126,7 @@ class ClosedLoopValidator:
         suite_dir = inputs.suite.path.parent if inputs.suite.path is not None else None
 
         with _exclusive_lock(target.parent):
+            _refuse_if_stale_backup_exists(backup_path, self.installer)
             original_mode = stat.S_IMODE(target.stat().st_mode)
             atomic_write_bytes(backup_path, target.read_bytes())
             self.installer.verify_backup(backup_path)
@@ -221,6 +221,7 @@ class ClosedLoopValidator:
         results: list[TaskResult] = []
         for task in suite.tasks:
             expected_sha = self.installer.install(artifact)
+            _verify_no_drift(self.installer.target_path, expected_sha)
             result = self._run_one_task(task, suite_dir=suite_dir)
             # Verify the agent didn't write to the tool file during the task.
             # Drift here means later tasks would silently run a corrupt baseline,
@@ -246,7 +247,10 @@ class ClosedLoopValidator:
         # never delivered, silently scoring a no-op. Tool/prompt installers expose no
         # ``skills_src`` (``getattr`` → None), so their behavior is unchanged.
         if task.skills_src and suite_dir is not None:
-            skills_src = suite_dir / task.skills_src
+            relative = Path(task.skills_src)
+            skills_src = (suite_dir / relative).resolve()
+            if relative.is_absolute() or ".." in relative.parts or not skills_src.is_relative_to(suite_dir.resolve()):
+                raise ValueError("skills_src must remain inside the suite directory")
         else:
             skills_src = getattr(self.installer, "skills_src", None)
         n_pass = 0
@@ -357,12 +361,12 @@ def _verify_no_drift(target: Path, expected_sha: str) -> None:
 
 
 def _materialize_fixture(fixture_dir: Path, setup: dict[str, str]) -> None:
+    from evolution.core.paths import write_contained
+
+    if not isinstance(setup, dict):
+        raise ValueError("fixture setup must map relative string paths to string contents")
     for relative_path, content in setup.items():
-        dest = fixture_dir / relative_path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(content)
-        # Scripts (shebang) must be executable so a task can run `./wrapper`;
-        # otherwise the agent hits "permission denied" and the verdict reflects
-        # the fixture, not the prompt. General rule, not a bin/ special-case.
-        if content.startswith("#!"):
-            dest.chmod(0o755)
+        if not isinstance(relative_path, str) or not isinstance(content, str):
+            raise ValueError("fixture paths and contents must be strings")
+        write_contained(fixture_dir, relative_path, content.encode("utf-8"),
+                        mode=0o755 if content.startswith("#!") else 0o600)

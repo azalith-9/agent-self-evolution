@@ -91,7 +91,10 @@ def build_swebench_runner(*, seeds: int, max_rounds: int, proposer_model: Option
                     env, tool_relpath=inst.gold_file, test_relpath="(swebench)",
                     bug_tests=org.bug_tests, oracle_failures=org.oracle_failures,
                     base_src=org.base_src, repair_result=repair, pass_to_pass=inst.pass_to_pass)
-                seed_results.append(bool(gate.deploy))
+                status = gate.decision.get("diagnostic_comparison", {}).get("status")
+                if status not in {"passed", "failed"}:
+                    return Skip("run_inconclusive")
+                seed_results.append(status == "passed")
             return OrganismResult(tool=inst.repo, fix_sha=inst.instance_id, seeds=seed_results)
         finally:
             env.destroy()

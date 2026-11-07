@@ -2,6 +2,12 @@
 
 The dataclasses, schemas, and on-disk formats the framework uses.
 
+Execution records use the [completion and evidence contracts](reference/execution-contracts.md#test-evidence).
+Additional `TestRun` completion fields default to unknown for legacy callers;
+neither a missing field nor a historical boolean establishes deployment readiness.
+Diagnostic `ValidationReport` comparisons and prompt deployment completeness
+remain [separate contracts](reference/execution-contracts.md#validation-and-persistence).
+
 ## EvolutionConfig (`evolution/core/config.py:18`)
 
 ```python
@@ -50,7 +56,7 @@ class EvolutionConfig:
     seed: int = 42                          # forwarded to dataset shuffle + GEPA/MIPROv2
 ```
 
-`skill_sources` runs `discover_skill_sources()` at construction time. Tests use a `_skill_source_env` autouse fixture to point this at a fake repo so they don't pick up real `~/.hermes` or `~/.claude` installations.
+`skill_sources` runs `discover_skill_sources()` at construction time. Tests use synthetic source roots and centrally isolated provider configuration/auth loading so developer Hermes or Claude installations cannot select a live provider or expose credentials.
 
 `val_ratio + holdout_ratio + train_ratio` is **deliberately not 1.0** — the synthetic builder normalizes them to sum to 1, so changing any one shifts the others proportionally. Default normalizes to ≈ 0.36/0.29/0.36 of N (≈ 54 train / 43 val / 53 holdout at the default `eval_dataset_size=150`).
 
@@ -741,13 +747,27 @@ The code-repair (Tier 4) and triage-sentinel (Tier 5) paths write their own on-d
 
 Written by `evolution/code/evolve_code.py`. Unlike the GEPA variants (bootstrap CI, knee-point, synthetic dataset) this gate is **deterministic-test / oracle** based — no judge, no bootstrap.
 
+**[PLANNED - Implementation Pending]** The comparison/verification separation and
+evidence schemas below specify intended behavior. They do not certify source
+behavior. The [deployment evidence reference](reference/deployment-evidence.md)
+is the canonical field/type, lifecycle, and replay contract.
+
 ```json
 {
   "schema_version": "1",
   "artifact_type": "code",
   "decision_signal": "deterministic_test",
-  "decision": "deploy",
-  "reason": "visible+held-out pass, surface frozen, regression floor green",
+  "decision": "reject",
+  "reason": "independent_test_verification_unavailable",
+  "diagnostic_comparison": {
+    "status": "passed",
+    "reason": "visible, held-out, scope, surface and regression checks passed"
+  },
+  "deployment_verification": {
+    "schema_version": "1",
+    "status": "unverifiable",
+    "reason": "independent_test_verification_unavailable"
+  },
   "target_tool": "tools/foo.py",
   "visible_test": "tests/tools/test_foo_a.py",
   "holdout_test": "tests/tools/test_foo_b.py",
@@ -766,6 +786,32 @@ Written by `evolution/code/evolve_code.py`. Unlike the GEPA variants (bootstrap 
 ```
 
 `decision_signal` is `deterministic_test` (held-out-split model) or `oracle_match` (campaign/measurement model). `holdout` / `holdout_test` / `visible_test` belong to the held-out gate; the **oracle** variant instead carries `test` (the full fix-commit test file), `bug_tests` (list), `oracle_failure_count`, `guards.bug_tests_passed`, and a `guards.oracle_match` block (`new_vs_oracle`, `oracle_failure_count`) — there `guards.floor` is often `null` because oracle-match over the full file *is* the regression check. `full_suite` is the optional `--benchmark-cmd` block (and may add `downgraded_from: "deploy"` if it demoted a pass).
+
+The example retains green diagnostic checks while refusing deployment because
+independent semantic proof is unavailable. `repair.fixed` describes the repair
+loop's visible-test success. `diagnostic_comparison` has required nonnullable
+`status` (`passed`, `failed`, or `inconclusive`) and nonempty string `reason`;
+it describes the full comparison, including scope, surface, and configured floor.
+Neither it nor `guards` authorizes export. Both code
+gates consume the shared internal verifier, whose persisted
+`deployment_verification` uses schema `"1"` and statuses `accepted`, `rejected`,
+and `unverifiable`. Only accepted verification with still-valid snapshot integrity
+can permit `decision="deploy"`. A historical artifact without this block supplies
+no such proof. The held-out gate retains deployment decisions `deploy`/`reject`.
+The oracle gate retains diagnostic decisions `correct`/`incorrect`, mapped to
+comparison `passed`/`failed`, with `inconclusive` for unavailable diagnostic results.
+An oracle `correct` can coexist with `deploy=false` and unverifiable independent
+proof; `incorrect` must not mean merely that proof was unavailable. See
+[comparison compatibility](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting)
+and [verification fields and outcomes](reference/deployment-evidence.md#verification-schema-1).
+
+Cooperative pytest diagnostic schema `"2"` tracks collected, selected, executed,
+skipped and deselected identities plus per-item lifecycle; its reader reports
+missing, unexpected and duplicate checks against independently established
+requirements. Schema `"1"` remains limited legacy diagnostics. Neither schema
+nor a process receipt establishes independent test semantics. Their
+[separate contracts](reference/deployment-evidence.md) also define supervisor
+receipt schema `"1"`, trusted-input identity and snapshot export requirements.
 
 ### `power_diagnostics.json`
 
@@ -822,23 +868,49 @@ Per-round repair record for human review (`evolution/code/trace.py`). No per-hun
 }
 ```
 
-`containment` records how confined the test execution actually was. `sandboxed: true`
-means writes outside the run dir and the OS temp roots were denied by the kernel — reads,
-process-exec and network are not restricted, so it prevents corrupting the checkout or home
-directory rather than providing isolation. `null` means the run environment reported no
-posture (the SWE-bench env and test fakes duck-type the runner), which is deliberately
-distinct from `false`: unknown must never read as known-unconfined.
+`containment` identifies the execution backend and its reported posture. The compact
+example does not by itself establish read, write, network, or cleanup guarantees.
+Deployment requires [capability and completion evidence](reference/execution-contracts.md#requests-and-policies)
+for the current invocation. `null` means unknown posture and differs from `false`;
+neither authorizes deployment. Scope checks, surface checks, execution evidence,
+and exported payload bind to the same protected bytes and modes. Benchmarks and
+later subprocesses require a final integrity recheck; drift invalidates prior
+acceptance. Historical write-only sandbox records remain
+readable without being promoted to evidence of stronger isolation.
 
 ### `campaign_ledger.jsonl` + `campaign_report.json`
 
-The campaign ledger is append-only/resumable; one line per organism (or skip reason). `deploy_reachable` is a majority of seeds.
+The campaign ledger is append-only/resumable; one line per organism (or skip reason).
+**[PLANNED - Implementation Pending]** Campaign seeds consume diagnostic
+comparison outcomes, separately from deployment eligibility. In a fully measured
+row, `seeds` is a nonempty list of Booleans: true for `passed`, false for an
+established `failed` comparison. It must not be computed from `gate.deploy`.
+`deploy_reachable` preserves the historical rule: at least one correct seed and
+`2 * n_correct >= len(seeds)` (two of three by default; an even-seed tie qualifies).
+It describes diagnostic repair reachability and grants no deployment authority.
+Unavailable independent verification alone preserves successful seeds and the
+organism's place in the diagnostic denominator. Each export still requires
+independent verification of its exact snapshot.
 
 ```jsonl
 {"status": "organism", "tool": "tools/approval.py", "fix_sha": "7f1b2b45…", "seeds": [true, false, false], "deploy_reachable": false}
 {"fix_sha": "934fbe3c…", "tool": "tools/ansi_strip.py", "status": "source_missing"}
 ```
 
-Skip `status` ∈ `source_missing` / `too_large` / `worktree_failed` / `not_valid` / `run_inconclusive`. `campaign_report.json` reduces the ledger to cluster-honest, **organism-level** estimands (`campaign_report.py`):
+Skip `status` ∈ `source_missing` / `too_large` / `worktree_failed` / `not_valid` /
+`run_inconclusive`. The last means diagnostic measurement was unavailable, not
+that independent deployment proof alone was unavailable. Preserve seed identities,
+reasons, and completed observations when measurement is interrupted. Resume only
+outstanding measurements; do not fabricate false seeds, silently shorten a seed
+list, or finalize a partial organism. Reports account for requested, measured,
+and inconclusive organisms/seeds explicitly; diagnostic rates cannot hide missing
+measurements by silently dropping them. Historical rows remain diagnostic records,
+not deployment proof. See the canonical
+[campaign accounting rules](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting).
+
+`campaign_report.json` reduces fully measured ledger rows to cluster-honest,
+**organism-level** estimands (`campaign_report.py`); the example shows that measured
+population, not the additional requested/inconclusive accounting:
 
 ```json
 {
@@ -871,6 +943,12 @@ Sentinel scan output (`evolution/monitor/queue.py`); `--attempt-top` annotates r
   "cost_summary": {}
 }
 ```
+
+`correct_seeds`, integer `seeds`, and `deploy_reachable` use the campaign's
+[diagnostic seed rules](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting).
+A verifier refusal cannot erase a measured success or turn it into a failed seed.
+Incomplete diagnostic measurement is `run_inconclusive`, retaining partial
+observations for resumption, rather than a completed `attempted` row.
 
 `attempt.status` ∈ `attempted` / `cost_ceiling` / `source_missing` / `too_large` / `worktree_failed` / `not_valid` / `run_inconclusive` (the `correct_seeds`/`seeds`/`deploy_reachable` fields appear only for `attempted`); `cost_summary` is present only when `--attempt-top` ran. `triage_report.md` renders a ranked markdown table (`#`, `kind`, `tool`, short `fix` sha, `committed` date) plus the propose-only disclaimer and the ready-to-run attempt command.
 

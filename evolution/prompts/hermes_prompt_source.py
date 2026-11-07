@@ -54,7 +54,7 @@ class HermesPromptSource:
             for name, (text, _node) in sorted(constants.items())
         ]
 
-    def _parse_string_constants(self) -> dict[str, tuple[str, ast.Constant]]:
+    def _parse_string_constants(self, data: bytes | None = None) -> dict[str, tuple[str, ast.Constant]]:
         """Return ``{name: (value, value_ast_node)}`` for every top-level
         string-typed assignment in prompt_builder.py.
 
@@ -63,7 +63,7 @@ class HermesPromptSource:
         string. The AST node is retained so ``write`` can splice by byte
         offset.
         """
-        source = self.prompt_builder_path.read_text(encoding="utf-8")
+        source = (data if data is not None else self.prompt_builder_path.read_bytes()).decode("utf-8")
         tree = ast.parse(source, filename=str(self.prompt_builder_path))
         out: dict[str, tuple[str, ast.Constant]] = {}
         for node in tree.body:
@@ -90,13 +90,13 @@ class HermesPromptSource:
         raises and leaves ``prompt_builder.py`` untouched, rather than
         leaving the user's Hermes unstartable.
         """
-        constants = self._parse_string_constants()
+        data = self.prompt_builder_path.read_bytes()
+        constants = self._parse_string_constants(data)
         if section_name not in constants:
             raise KeyError(
                 f"section {section_name!r} not found in {self.prompt_builder_path}"
             )
         _, value_node = constants[section_name]
-        data = self.prompt_builder_path.read_bytes()
         start_offset = _byte_offset(data, value_node.lineno, value_node.col_offset)
         end_offset = _byte_offset(
             data, value_node.end_lineno, value_node.end_col_offset

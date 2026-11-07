@@ -82,6 +82,7 @@ class TaskSuite:
         raw = path.read_bytes()
         sha = hashlib.sha256(raw).hexdigest()
         tasks: list[Task] = []
+        task_ids: set[str] = set()
         for lineno, line in enumerate(raw.decode("utf-8").splitlines(), start=1):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
@@ -91,7 +92,15 @@ class TaskSuite:
                 raise ValueError(
                     f"{path}:{lineno}: invalid JSON: {exc}"
                 ) from exc
-            tasks.append(_task_from_dict(obj, source=f"{path}:{lineno}"))
+            task = _task_from_dict(obj, source=f"{path}:{lineno}")
+            if task.task_id in task_ids:
+                raise ValueError(f"{path}:{lineno}: duplicate task_id {task.task_id!r}")
+            task_ids.add(task.task_id)
+            if task.skills_src is not None:
+                candidate = (path.parent / task.skills_src).resolve()
+                if not candidate.is_relative_to(path.parent.resolve()):
+                    raise ValueError(f"{path}:{lineno}: skills_src escapes suite directory")
+            tasks.append(task)
         if not tasks:
             raise ValueError(f"{path}: no tasks parsed (empty or all-comment file)")
         return cls(path=path, sha256=sha, tasks=tuple(tasks))
@@ -116,16 +125,31 @@ def split_train_holdout(
     return train, holdout
 
 
+def _validate_relative_path(value: str, *, source: str) -> None:
+    path = Path(value)
+    if not value or path.is_absolute() or ".." in path.parts:
+        raise ValueError(f"{source}: path must be contained and relative: {value!r}")
+
+
 def _task_from_dict(obj: dict, *, source: str) -> Task:
+    if not isinstance(obj, dict):
+        raise ValueError(f"{source}: task must be an object")
     if "task_id" not in obj:
         raise ValueError(f"{source}: task missing required field 'task_id'")
     if "user_message" not in obj:
         raise ValueError(f"{source}: task missing required field 'user_message'")
-    fixture_setup = obj.get("fixture_setup") or {}
+    for key in ("task_id", "user_message"):
+        if not isinstance(obj[key], str) or (key == "task_id" and not obj[key]):
+            raise ValueError(f"{source}: {key} must be a nonempty string")
+    fixture_setup = obj.get("fixture_setup", {})
     if not isinstance(fixture_setup, dict):
         raise ValueError(
             f"{source}: fixture_setup must be a dict of relative_path -> content"
         )
+    for relative, content in fixture_setup.items():
+        if not isinstance(relative, str) or not isinstance(content, str):
+            raise ValueError(f"{source}: fixture paths and contents must be strings")
+        _validate_relative_path(relative, source=source)
     test_command = obj.get("test_command")
     if test_command is not None and not isinstance(test_command, str):
         raise ValueError(
@@ -142,6 +166,8 @@ def _task_from_dict(obj: dict, *, source: str) -> Task:
         raise ValueError(
             f"{source}: skills_src must be a string (got {type(skills_src).__name__})"
         )
+    if skills_src is not None:
+        _validate_relative_path(skills_src, source=source)
     expected_action = obj.get("expected_action")
     if expected_action is not None and not isinstance(expected_action, str):
         raise ValueError(

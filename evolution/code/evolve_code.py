@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -28,7 +29,9 @@ from evolution.core.sandbox import require_sandbox_or_fail
 from evolution.code.worktree import WorktreeEnv, WorktreeError
 from evolution.core.hermes_provider import resolve_default_lm
 from evolution.core.pr_automation import create_pr
-from evolution.core.quality_gate import run_benchmark_hook, write_gate_decision
+from evolution.core.quality_gate import write_gate_decision
+from evolution.code.deployment_evidence import verify_deployment
+from evolution.code.worktree import _run
 
 console = Console()
 
@@ -132,7 +135,7 @@ def _resolve_proposer(proposer_model: str | None):
               type=click.Path(file_okay=False, path_type=Path),
               help="Where to write gate_decision.json + repair_trace.json.")
 @click.option("--benchmark-cmd", default=None,
-              help="Full-suite floor run once at PR time (cwd is yours — cd \"$WORKTREE_PATH\"). "
+              help="Full-suite floor run inside the confined repair worktree. "
                    "Receives WORKTREE_PATH, EVOLVED_PATH, RUN_DIR, TARGET_NAME, ARTIFACT_TYPE.")
 @click.option("--benchmark-timeout-seconds", default=1800, type=click.IntRange(min=1),
               help="Wall-clock cap for --benchmark-cmd (default 1800s).")
@@ -142,10 +145,9 @@ def _resolve_proposer(proposer_model: str | None):
 @click.option("--pr-branch-prefix", default="evolve-code/", help="Branch name prefix.")
 @click.option("--pr-draft/--no-pr-draft", "pr_draft", default=True,
               help="Open the PR as a draft (default: draft — human review required).")
-@click.option("--require-sandbox/--allow-unconfined", "require_sandbox", default=False,
-              help="Refuse to run tests unless the OS can confine writes to the run "
-                   "dir. Off by default because confinement is macOS-only; the posture "
-                   "is recorded in repair_trace.json either way.")
+@click.option("--require-sandbox/--allow-unconfined", "require_sandbox", default=True,
+              help="Require verified OS containment (default). --allow-unconfined is "
+                   "an explicit diagnostic opt-out recorded in the trace.")
 @click.option("--pr-label", default="human-review",
               help="Label applied to the PR (default 'human-review'). Empty to skip.")
 def main(
@@ -251,25 +253,30 @@ def main(
             run_inputs=run_inputs,
         )
 
-        # Full-suite tier: only at deploy time, only if requested. The hook runs
-        # in the user's cwd, so WORKTREE_PATH tells their command where to cd;
-        # set it only for the hook's duration rather than leaking it globally.
         if gate.deploy and benchmark_cmd:
-            import os
-            prior = os.environ.get("WORKTREE_PATH")
-            os.environ["WORKTREE_PATH"] = str(env.worktree)
+            evolved_path = env.worktree / tool_relpath
+            child_env = env._test_env()
+            child_env.update(WORKTREE_PATH=str(env.worktree), EVOLVED_PATH=str(evolved_path),
+                             BASELINE_PATH=str(evolved_path), RUN_DIR=str(output_dir),
+                             TARGET_NAME=tool_relpath, ARTIFACT_TYPE="code")
+            argv, _ = env.confine(["/bin/sh", "-c", benchmark_cmd])
+            start = time.monotonic()
             try:
-                evolved_path = env.worktree / tool_relpath
-                block = run_benchmark_hook(
-                    benchmark_cmd, timeout_seconds=benchmark_timeout_seconds,
-                    evolved_path=evolved_path, baseline_path=evolved_path,
-                    output_dir=output_dir, target_name=tool_relpath, artifact_type="code",
-                )
-            finally:
-                if prior is None:
-                    os.environ.pop("WORKTREE_PATH", None)
-                else:
-                    os.environ["WORKTREE_PATH"] = prior
+                benchmark = _run(argv, cwd=env.worktree, timeout=benchmark_timeout_seconds,
+                                 env=child_env)
+                block = {"command": benchmark_cmd, "exit_code": benchmark.returncode,
+                         "passed": benchmark.returncode == 0 and benchmark.cleanup_complete,
+                         "stdout_tail": benchmark.stdout[-6000:],
+                         "stderr_tail": benchmark.stderr[-6000:],
+                         "reason": "ok" if benchmark.returncode == 0 else "exit_nonzero"}
+            except (subprocess.TimeoutExpired, WorktreeError, OSError) as exc:
+                block = {"command": benchmark_cmd, "exit_code": None, "passed": False,
+                         "stdout_tail": "", "stderr_tail": str(exc), "reason": "execution_error"}
+            block["duration_seconds"] = round(time.monotonic() - start, 3)
+            changed = env.changed_files()
+            if any(path != tool_relpath for path in changed):
+                block["passed"] = False
+                block["reason"] = "file_scope_changed"
             block["is_full_suite"] = True
             gate.decision["full_suite"] = block
             if not block["passed"]:
@@ -278,18 +285,27 @@ def main(
                 gate.decision["downgraded_from"] = "deploy"  # gate passed; full suite didn't
                 gate.decision["reason"] = "full-suite benchmark failed"
 
+        if gate.deploy:
+            verification = verify_deployment(env, tool_relpath=tool_relpath)
+            gate.decision["deployment_verification"] = verification
+            if verification["status"] != "accepted":
+                gate.deploy = False
+                gate.reason = verification["reason"]
+                gate.decision.update(decision="reject", reason=gate.reason)
+
         final_diff = env.diff()
         write_gate_decision(output_dir, gate.decision)
-        write_repair_trace(output_dir, build_repair_trace(
+        trace = build_repair_trace(
             tool=tool_relpath, visible_test=visible_test, holdout_test=holdout_test,
             result=result, final_diff=final_diff, containment=containment_of(env),
-        ))
+        )
+        write_repair_trace(output_dir, trace)
         console.print(f"  decision: [bold]{gate.decision['decision']}[/bold] — {gate.reason}")
         console.print(f"  artifacts: [dim]{output_dir}[/dim]")
 
         if gate.deploy and create_pr_flag and result.final_source is not None:
             _open_pr(env, tool_relpath, result.final_source, gate.decision, output_dir,
-                     pr_base_branch, pr_branch_prefix, pr_draft, pr_label)
+                     pr_base_branch, pr_branch_prefix, pr_draft, pr_label, trace=trace)
         elif gate.deploy and create_pr_flag:
             console.print("[yellow]deploy but no final source to PR (unexpected).[/yellow]")
 
@@ -299,14 +315,14 @@ def main(
 
 
 def _open_pr(env, tool_relpath, final_source, decision, output_dir,
-             pr_base_branch, pr_branch_prefix, pr_draft, pr_label) -> None:
+             pr_base_branch, pr_branch_prefix, pr_draft, pr_label, *, trace: dict) -> None:
     # Save the repaired source as the artifact create_pr copies onto a clean
     # branch-from-origin (isolating the PR diff to exactly this file).
+    verification = verify_deployment(env, tool_relpath=tool_relpath)
+    if verification["status"] != "accepted":
+        raise WorktreeError(verification["reason"])
     evolved_path = output_dir / f"evolved_{Path(tool_relpath).name}"
     evolved_path.write_text(final_source)
-    trace_path = output_dir / "repair_trace.json"
-    import json
-    trace = json.loads(trace_path.read_text()) if trace_path.exists() else {}
     body = _format_pr_body(decision, trace)
     result = create_pr(
         source_repo_root=env.worktree,

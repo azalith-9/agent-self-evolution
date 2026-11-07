@@ -131,6 +131,24 @@ Used pervasively. `typing.Protocol` + `runtime_checkable` for `SkillSource`.
 
 ## External services
 
+### Execution containment backends
+
+Repository-controlled setup, imports, tests, and benchmarks use offline,
+capability-tested containment. Linux uses Bubblewrap; macOS uses the OS adapter
+only for policies whose required guarantees it can establish. Backend binaries
+are host prerequisites rather than Python dependencies. A successful launch or
+installed version does not prove denied reads, denied networking, or cleanup.
+See [containment capabilities](concepts/execution-safety.md#containment-capabilities).
+
+Dependency retrieval is separately authorized and completes before repository
+build execution. Missing offline build prerequisites cause refusal rather than
+an unconfined or network-enabled build retry. Restricted destination access needs
+an enforceable mechanism; Bubblewrap's network namespace alone is not an allowlist.
+
+Native backend and dependency changes require current primary documentation and
+observed compatibility checks. Preserve `engine="litellm"` and the DSPy 3.4 bounds
+until custom engine migration is verified; add no speculative dependency ceilings.
+
 ### OpenAI API
 
 The default LM provider. Three call patterns with different cost profiles:
@@ -151,9 +169,9 @@ Closed-loop validation and prompt-section evolution shell out to a real agent CL
 
 | Tool | Used by | Auth | Notes |
 |---|---|---|---|
-| `hermes` CLI (`hermes -z`) | Hermes backend / closed-loop tool+skill suites | per the hermes checkout | Sandboxed via `HERMES_HOME`/`HOME` override to a tmp dir. |
+| `hermes` CLI (`hermes -z`) | Hermes backend / closed-loop tool+skill suites | selected provider credential only | Private `HERMES_HOME`/`HOME` plus the execution policy; a home override alone is not containment. |
 | `claude` CLI (`claude -p`) | Claude Code backend (`--target claude`) | `CLAUDE_CODE_OAUTH_TOKEN` env (from `claude setup-token`; subscription billing) — **not** `--bare`, which ignores the token | stream-json parsed for tool calls + cost. |
-| macOS `sandbox-exec` | Claude backend containment | n/a | Wraps `claude -p` in a write-restrict profile (deny writes outside the fixture + HOME + temp). The runner raises `SandboxUnavailableError` rather than running unconfined when it's absent (non-macOS). |
+| OS containment backend | Repository execution and validation agents | n/a | Linux Bubblewrap or the capable macOS adapter. Required capability failures raise a containment refusal; agent Write/Edit tools are inside the same boundary. |
 
 `litellm.cost_per_token` is used as a cost fallback in the Claude runner: subscription/OAuth runs report `total_cost_usd == 0`, so the runner prices the reported token usage via litellm to meter spend against `--max-cost-usd` (recorded as `computed`; a no-token run stays `uncaptured`).
 
@@ -200,7 +218,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 ```
 
-No pytest plugins are required at runtime. The `_skill_source_env` autouse fixture is defined per-test-module rather than centrally — see `tests/core/test_constraints.py:9` for the pattern.
+No third-party pytest reporting plugin is required. Repair execution uses the
+harness-owned evidence plugin and strict reader described in the
+[test evidence contract](reference/execution-contracts.md#test-evidence).
+The framework's tests isolate provider configuration and authentication loading
+centrally, alongside synthetic discovery roots. They require no live credentials
+or global `Path.home()` workaround.
 
 ## What this codebase does NOT depend on
 

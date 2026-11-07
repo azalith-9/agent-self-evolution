@@ -9,6 +9,7 @@ build/
 .venv/
 venv/
 .env
+.review/
 
 # Generated eval datasets (local, not shared)
 datasets/**/*.jsonl
@@ -42,3 +43,12 @@ reports/*.pins.json
 # swebench build logs + local Task 0 spike scripts
 logs/
 scratch/
+
+# Local agent runtime and recovery state
+.amplihack/
+.claude/runtime/
+.codegraph/
+.mimosa/
+*.pid
+/checkpoints/
+/CHECKPOINT.md

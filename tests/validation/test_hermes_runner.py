@@ -17,6 +17,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.validation.process_stub import process_stub
+
 from evolution.validation.agent_runner import TaskRunContext
 from evolution.validation.hermes_runner import (
     HermesAgentRunner,
@@ -813,7 +815,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             result = runner.run(TaskRunContext(
                 user_message="please patch a file",
                 fixture_dir=fixture_dir,
@@ -833,7 +835,7 @@ class TestHermesAgentRunnerSubprocess:
         runner = HermesAgentRunner(timeout_seconds=1, user_config_path=tmp_path / "x")
         import subprocess as _subprocess
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
+            "evolution.validation.hermes_runner.run_process",
             side_effect=_subprocess.TimeoutExpired(cmd="hermes", timeout=1),
         ):
             result = runner.run(TaskRunContext(
@@ -850,7 +852,7 @@ class TestHermesAgentRunnerSubprocess:
             user_config_path=tmp_path / "x",
         )
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
+            "evolution.validation.hermes_runner.run_process",
             side_effect=FileNotFoundError("hermes-does-not-exist"),
         ):
             result = runner.run(TaskRunContext(
@@ -867,7 +869,7 @@ class TestHermesAgentRunnerSubprocess:
             # Don't write a state.db.
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             result = runner.run(TaskRunContext(
                 user_message="run",
                 fixture_dir=fixture_dir,
@@ -893,7 +895,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="run",
                 fixture_dir=fixture_dir,
@@ -929,7 +931,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="debug it",
                 fixture_dir=fixture_dir,
@@ -957,7 +959,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="debug",
                 fixture_dir=fixture_dir,
@@ -984,7 +986,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="hello",
                 fixture_dir=fixture_dir,
@@ -1017,7 +1019,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="debug",
                 fixture_dir=fixture_dir,
@@ -1042,7 +1044,7 @@ class TestHermesAgentRunnerSubprocess:
             )
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)):
             runner.run(TaskRunContext(
                 user_message="run",
                 fixture_dir=fixture_dir,
@@ -1087,8 +1089,8 @@ class TestHermesAgentRunnerCostLedger:
         )
 
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
-            side_effect=self._fake_run_with_cost_db(0.01),
+            "evolution.validation.hermes_runner.run_process",
+            side_effect=process_stub(self._fake_run_with_cost_db(0.01)),
         ):
             result = runner.run(TaskRunContext(
                 user_message="do something",
@@ -1114,7 +1116,7 @@ class TestHermesAgentRunnerCostLedger:
         def _no_db(*args, **kwargs):
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-        with patch("evolution.validation.hermes_runner.subprocess.run", side_effect=_no_db):
+        with patch("evolution.validation.hermes_runner.run_process", side_effect=process_stub(_no_db)):
             result = runner.run(TaskRunContext(
                 user_message="run",
                 fixture_dir=fixture_dir,
@@ -1138,7 +1140,7 @@ class TestHermesAgentRunnerCostLedger:
         )
 
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
+            "evolution.validation.hermes_runner.run_process",
             side_effect=_subprocess.TimeoutExpired(cmd="hermes", timeout=1),
         ):
             result = runner.run(TaskRunContext(
@@ -1163,7 +1165,7 @@ class TestHermesAgentRunnerCostLedger:
         )
 
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
+            "evolution.validation.hermes_runner.run_process",
             side_effect=FileNotFoundError("no-such-hermes"),
         ):
             result = runner.run(TaskRunContext(
@@ -1194,8 +1196,8 @@ class TestHermesAgentRunnerCostLedger:
             cost_ledger=ledger,
         )
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
-            side_effect=self._fake_run_with_cost_db(0.01),
+            "evolution.validation.hermes_runner.run_process",
+            side_effect=process_stub(self._fake_run_with_cost_db(0.01)),
         ):
             with pytest.raises(CostCeilingExceeded) as exc_info:
                 runner.run(TaskRunContext(
@@ -1216,8 +1218,8 @@ class TestHermesAgentRunnerCostLedger:
             cost_ledger=ledger,
         )
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run",
-            side_effect=self._fake_run_with_cost_db(0.01),
+            "evolution.validation.hermes_runner.run_process",
+            side_effect=process_stub(self._fake_run_with_cost_db(0.01)),
         ):
             result = runner.run(TaskRunContext(
                 user_message="spend", fixture_dir=fixture_dir,
@@ -1250,7 +1252,7 @@ class TestHermesAgentRunnerCostLedger:
             return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         with patch(
-            "evolution.validation.hermes_runner.subprocess.run", side_effect=_fake_run
+            "evolution.validation.hermes_runner.run_process", side_effect=process_stub(_fake_run)
         ), patch(
             "evolution.validation.hermes_runner.parse_session_from_db",
             side_effect=RuntimeError("boom"),

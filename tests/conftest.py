@@ -65,3 +65,17 @@ def _stub_auth_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
         "evolution.tools.evolve_tool._preflight_lm_credentials",
     ):
         monkeypatch.setattr(module_path, noop, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ignore developer discovery while retaining explicit synthetic Hermes homes."""
+    from pathlib import Path
+    from evolution.core import hermes_provider
+
+    default_home = Path.home() / ".hermes"
+    for name, empty in (("_load_cli_config", None), ("_load_auth_store", {})):
+        original = getattr(hermes_provider, name)
+        def isolated(home, _original=original, _empty=empty):
+            return _empty if home == default_home else _original(home)
+        monkeypatch.setattr(hermes_provider, name, isolated)

@@ -46,12 +46,13 @@ def _gate(repo: StagedRepo, result: RepairResult):
 
 
 class TestCodeGate:
-    def test_clean_fix_deploys(self, tmp_path):
+    def test_clean_fix_retains_diagnostics_without_certification(self, tmp_path):
         repo = _repo(tmp_path)
         repo.write_tool(TOOL, FIXED_CALC)  # repair engine wrote this
         res = _gate(repo, _fixed_result(FIXED_CALC))
-        assert res.deploy, res.reason
-        assert res.decision["decision"] == "deploy"
+        assert not res.deploy
+        assert res.decision["diagnostic_comparison"]["status"] == "passed"
+        assert res.decision["deployment_verification"]["reason"] == "independent_test_verification_unavailable"
         assert res.decision["guards"]["holdout"]["passed"]
         assert res.decision["guards"]["floor"]["new_failures"] == []
 

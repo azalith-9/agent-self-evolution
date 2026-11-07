@@ -327,6 +327,20 @@ class TestScoreTaskActionPatch:
 
 
 class TestScoreTaskTestCommandMode:
+    @pytest.fixture(autouse=True)
+    def _synthetic_execution(self, monkeypatch):
+        from dataclasses import replace
+        from evolution.core import process
+
+        execute = process.run_process
+
+        def synthetic(request, **kwargs):
+            # These scripts are test-owned; containment behavior has native tests.
+            request = replace(request, policy=replace(request.policy, required=False))
+            return execute(request, **kwargs)
+
+        monkeypatch.setattr(process, "run_process", synthetic)
+
     """When ``test_command`` is set on a task, the verdict is exit-code-driven,
     not tool-call-driven. Used by skill-side suites (e.g., planted-bug:
     "did the agent's edits make the test pass").

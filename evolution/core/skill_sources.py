@@ -21,11 +21,35 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
+import yaml
+
 logger = logging.getLogger(__name__)
+
+
+def _valid_skill_name(name: str) -> bool:
+    return bool(name) and name not in {".", ".."} and "/" not in name and "\\" not in name
+
+
+def _version_key(path: Path) -> tuple[
+    bool, tuple[int, ...], bool, tuple[tuple[int, int | str], ...], str
+]:
+    """Order numeric releases, prereleases, then deterministic non-version labels."""
+    match = re.fullmatch(r"v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", path.name)
+    if match is None:
+        return False, (), False, (), path.name
+    components = tuple(int(value) for value in match.group(1).split("."))
+    components += (0,) * max(0, 3 - len(components))
+    prerelease = match.group(2)
+    identifiers: tuple[tuple[int, int | str], ...] = tuple(
+        (0, int(value)) if value.isdigit() else (1, value)
+        for value in (prerelease.split(".") if prerelease else [])
+    )
+    return True, components, prerelease is None, identifiers, path.name
 
 
 def _iter_skill_files(root: Path) -> Iterator[Path]:
@@ -96,6 +120,8 @@ class HermesSkillSource:
         return d if d.exists() and d.is_dir() else None
 
     def find_skill(self, skill_name: str) -> Optional[Path]:
+        if not _valid_skill_name(skill_name):
+            return None
         skills_dir = self._skills_dir()
         if skills_dir is None:
             return None
@@ -108,9 +134,18 @@ class HermesSkillSource:
         for skill_md in skill_files:
             try:
                 head = skill_md.read_text()[:500]
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 continue
-            if f"name: {skill_name}" in head or f'name: "{skill_name}"' in head:
+            if not head.startswith("---\n"):
+                continue
+            parts = head.split("---", 2)
+            if len(parts) != 3:
+                continue
+            try:
+                metadata = yaml.safe_load(parts[1])
+            except yaml.YAMLError:
+                continue
+            if isinstance(metadata, dict) and metadata.get("name") == skill_name:
                 return skill_md
         return None
 
@@ -130,7 +165,7 @@ class ClaudeCodeSkillSource:
     Multiple plugin packages may install simultaneously, and a single
     plugin may have multiple versions in the cache. On collision (same
     skill name across plugins or versions), the highest-versioned entry
-    wins via lexicographic sort of version strings (works for SemVer).
+    wins by parsed release ordering; non-version labels sort below releases.
     """
 
     def __init__(
@@ -143,8 +178,7 @@ class ClaudeCodeSkillSource:
     def _skill_dirs(self) -> list[Path]:
         """All ``<vendor>/<plugin>/<version>/skills`` directories on disk.
 
-        On per-plugin version collisions the highest version (lex-sorted, works
-        for SemVer) wins.
+        Parsed releases take precedence over non-version labels.
         """
         if not self.plugins_cache.exists():
             return []
@@ -157,7 +191,7 @@ class ClaudeCodeSkillSource:
                     continue
                 versions = sorted(
                     (v for v in plugin.iterdir() if v.is_dir()),
-                    key=lambda p: p.name,
+                    key=_version_key,
                 )
                 if not versions:
                     continue
@@ -167,11 +201,11 @@ class ClaudeCodeSkillSource:
         return roots
 
     def find_skill(self, skill_name: str) -> Optional[Path]:
-        # Symlink-safe already: builds direct paths + is_file() (follows
-        # symlinks) and lists via iterdir(); no recursive rglob to trip over.
+        if not _valid_skill_name(skill_name):
+            return None
         for skills_dir in self._skill_dirs():
             candidate = skills_dir / skill_name / "SKILL.md"
-            if candidate.is_file():
+            if candidate.is_file() and candidate.resolve().is_relative_to(skills_dir.resolve()):
                 return candidate
         return None
 
@@ -197,12 +231,11 @@ class LocalDirSkillSource:
         self.name = f"local-dir:{self.root}"
 
     def find_skill(self, skill_name: str) -> Optional[Path]:
-        # Symlink-safe already: direct path + is_file() follows symlinks
-        # (flat layout, no recursive rglob).
-        if not self.root.is_dir():
+        if not _valid_skill_name(skill_name) or not self.root.is_dir():
             return None
         candidate = self.root / skill_name / "SKILL.md"
-        return candidate if candidate.is_file() else None
+        return (candidate if candidate.is_file()
+                and candidate.resolve().is_relative_to(self.root.resolve()) else None)
 
     def list_skills(self) -> list[str]:
         if not self.root.is_dir():

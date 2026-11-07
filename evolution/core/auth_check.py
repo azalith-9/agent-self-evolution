@@ -21,6 +21,8 @@ as defense-in-depth.
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 import litellm
@@ -30,6 +32,9 @@ from evolution.core.hermes_provider import (
     HermesProviderError,
     ResolvedLM,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class HermesProviderRateLimitError(HermesProviderError):
@@ -53,8 +58,6 @@ _AUTH_ERROR_PATTERNS: Tuple[str, ...] = (
     "token revoked",
     "access denied",
     "forbidden",
-    "401",
-    "403",
     # botocore.exceptions.NoCredentialsError surfaces this verbatim through
     # LiteLLM's bedrock provider when the boto3 chain finds no credentials.
     "unable to locate credentials",
@@ -64,7 +67,6 @@ _AUTH_ERROR_PATTERNS: Tuple[str, ...] = (
 _RATE_LIMIT_PATTERNS: Tuple[str, ...] = (
     "rate limit",
     "too many requests",
-    "429",
 )
 
 # Per-provider recovery commands. ``hermes login`` is deprecated upstream;
@@ -153,14 +155,18 @@ def is_auth_error(exc: BaseException) -> bool:
     # future versions where the message format changes.
     if isinstance(exc, getattr(litellm, "PermissionDeniedError", ())):
         return True
-    return _matches_pattern(exc, _AUTH_ERROR_PATTERNS)
+    return _http_status(exc) in (401, 403) or _matches_pattern(exc, _AUTH_ERROR_PATTERNS) or bool(
+        re.search(r"\b(?:401|403)\b", str(exc))
+    )
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
     """True if ``exc`` is a rate-limit failure (typed or message-matched)."""
     if isinstance(exc, (litellm.RateLimitError, LMRateLimitError)):
         return True
-    return _matches_pattern(exc, _RATE_LIMIT_PATTERNS)
+    return _http_status(exc) == 429 or _matches_pattern(exc, _RATE_LIMIT_PATTERNS) or bool(
+        re.search(r"\b429\b", str(exc))
+    )
 
 
 def format_auth_error_message(
@@ -198,6 +204,13 @@ def format_auth_error_message(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _http_status(exc: BaseException) -> int | None:
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def _matches_pattern(exc: BaseException, patterns: Iterable[str]) -> bool:
@@ -246,7 +259,7 @@ def _probe_one(
             _probe_responses(lm=lm, responses_fn=responses_fn, timeout=timeout)
         else:
             _probe_chat(lm=lm, completion_fn=completion_fn, timeout=timeout)
-    except BaseException as exc:
+    except Exception as exc:
         provider_hint = lm.provider_hint or _provider_hint_from_model(lm.model)
         _translate_or_reraise(exc, model=lm.model, provider_hint=provider_hint)
 
@@ -347,5 +360,6 @@ def _translate_or_reraise(
     # fine. Suppress; the actual GEPA call will surface real errors at
     # the right time.
     if isinstance(exc, getattr(litellm, "BadRequestError", ())):
+        logger.warning("Preflight payload rejected for model %s: %s", model, exc)
         return
     raise exc

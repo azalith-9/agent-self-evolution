@@ -22,12 +22,10 @@ from __future__ import annotations
 import ast
 import json
 import logging
-import os
 import re
-import shutil
-import tempfile
 from pathlib import Path
 
+from evolution.core.paths import contained_relative, read_contained, write_contained
 from evolution.tools.tool_source import ToolEntry, ToolManifest
 
 logger = logging.getLogger(__name__)
@@ -60,8 +58,8 @@ class HermesToolSource:
             return False
         for py_file in self._iter_py_files(candidate):
             try:
-                tree = ast.parse(py_file.read_text())
-            except (SyntaxError, OSError):
+                tree = ast.parse(read_contained(candidate, py_file.relative_to(candidate)).decode("utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
                 continue
             for node in tree.body:
                 if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
@@ -81,9 +79,9 @@ class HermesToolSource:
 
         for py_file in sorted(self._iter_py_files(candidate)):
             try:
-                source = py_file.read_text()
+                source = read_contained(candidate, py_file.relative_to(candidate)).decode("utf-8")
                 tree = ast.parse(source)
-            except (SyntaxError, OSError) as exc:
+            except (SyntaxError, OSError, UnicodeDecodeError) as exc:
                 logger.warning("skipping %s: parse failed: %s", py_file, exc)
                 continue
 
@@ -170,7 +168,8 @@ class HermesToolSource:
             )
 
         file_path, lineno, col_offset, end_lineno, end_col_offset = entry.source_location
-        data = file_path.read_bytes()
+        relative = contained_relative(self.root, file_path)
+        data = read_contained(self.root, relative)
 
         # CPython documents ast.col_offset as a byte offset into the UTF-8
         # encoded source. Splicing on raw bytes throughout — rather than on
@@ -182,19 +181,7 @@ class HermesToolSource:
         replacement = _format_replacement(new_description).encode("utf-8")
         new_bytes = data[:start_offset] + replacement + data[end_offset:]
 
-        # Atomic write: temp file in the same dir, then os.replace.
-        fd, tmp_name = tempfile.mkstemp(dir=file_path.parent, suffix=file_path.suffix)
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(new_bytes)
-            # mkstemp creates files with mode 0600; copy the original mode
-            # so atomic replace doesn't clobber the source file's perms.
-            shutil.copymode(file_path, tmp_path)
-            os.replace(tmp_path, file_path)
-        except BaseException:
-            tmp_path.unlink(missing_ok=True)
-            raise
+        write_contained(self.root, relative, new_bytes)
 
     # ------------------------------------------------------------------
     # Internals
@@ -202,7 +189,7 @@ class HermesToolSource:
 
     def _iter_py_files(self, root: Path):
         for py_file in root.rglob("*.py"):
-            if "__pycache__" in py_file.parts:
+            if "__pycache__" in py_file.parts or py_file.is_symlink():
                 continue
             yield py_file
 

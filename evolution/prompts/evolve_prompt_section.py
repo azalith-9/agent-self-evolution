@@ -195,11 +195,6 @@ def _prompt_builder_guard(target_path: Path) -> Iterator[None]:
     acquires the same lock itself — never nested.
     """
     backup_path = target_path.with_suffix(target_path.suffix + _BACKUP_SUFFIX)
-    if backup_path.exists():
-        raise RuntimeError(
-            f"Stale backup at {backup_path} — a prior run did not clean up. "
-            f"Restore {target_path} from it manually, then retry."
-        )
     lock_fd = open(target_path.parent / _LOCK_FILENAME, "w")
     try:
         try:
@@ -209,6 +204,11 @@ def _prompt_builder_guard(target_path: Path) -> Iterator[None]:
                 f"Another harness run holds {target_path.parent / _LOCK_FILENAME}. "
                 f"Wait for it to finish."
             ) from exc
+        if backup_path.exists():
+            raise RuntimeError(
+                f"Stale backup at {backup_path} — a prior run did not clean up. "
+                f"Restore {target_path} from it manually, then retry."
+            )
         original_mode = stat.S_IMODE(target_path.stat().st_mode)
         atomic_write_bytes(backup_path, target_path.read_bytes())
         try:
@@ -239,11 +239,14 @@ def _run_one_task_score(
     n_abstain = 0
 
     # ``skills_src`` is a path relative to the suite file's directory.
-    skills_src = (
-        (suite_dir / task.skills_src)
-        if (task.skills_src and suite_dir is not None)
-        else None
-    )
+    skills_src = None
+    if task.skills_src and suite_dir is not None:
+        from evolution.core.paths import relative_parts
+
+        relative_parts(task.skills_src)
+        skills_src = (suite_dir / task.skills_src).resolve()
+        if not skills_src.is_relative_to(suite_dir.resolve()):
+            raise ValueError("skills_src must remain inside the suite directory")
 
     for _ in range(reps):
         with tempfile.TemporaryDirectory(prefix="ps_inner_") as fixture_tmp:
@@ -314,6 +317,12 @@ def _synth_feedback(task: Task, observed: str) -> str:
         f"forbidden={list(task.forbidden_tools) or '[]'}"
     )
     return f"{observed}; objective: {objective}"
+
+
+def _verify_candidate(path: Path, expected_sha: str) -> None:
+    from evolution.validation.validator import _verify_no_drift
+
+    _verify_no_drift(path, expected_sha)
 
 
 def evolve_prompt_section(
@@ -460,11 +469,13 @@ def evolve_prompt_section(
     tasks_by_id = {t.task_id: t for t in suite.tasks}
     suite_dir = suite.path.parent if suite.path is not None else None
 
+    installed_sha: list[str] = []
+
     def install_candidate(candidate_text: str) -> None:
         # Uniform across backends: install through the installer (whose target_path
         # the runner reads). For claude this is a throwaway append-prompt file — never
         # the user's CLAUDE.md, which only --apply writes (backend.deploy).
-        backend.install_candidate(candidate_text)
+        installed_sha[:] = [backend.install_candidate(candidate_text)]
 
     def score_task_id(task_id: str) -> ScoreResult:
         return _run_one_task_score(
@@ -481,6 +492,7 @@ def evolve_prompt_section(
     scorer = make_memoizing_splice_scorer(
         install_fn=install_candidate,
         score_fn=score_task_id,
+        verify_fn=lambda: _verify_candidate(installer.target_path, installed_sha[0]),
         lock=threading.Lock(),
     )
 
@@ -790,6 +802,19 @@ def evolve_prompt_section(
             **section_payload,
         })
         return {"decision": "aborted", "reason": "cost_ceiling_exceeded"}
+
+    except Exception as exc:
+        write_gate_decision(output_dir, {
+            "schema_version": _GATE_SCHEMA_VERSION,
+            "decision": "aborted",
+            "reason": "unexpected_error",
+            "decision_signal": "closed_loop",
+            "error_type": type(exc).__name__,
+            "run_inputs": run_inputs,
+            "pr_created": disabled_pr_block(),
+            **section_payload,
+        })
+        raise
 
     # PR automation for prompt sections is deferred: create_pr copies a full
     # evolved file over origin/<base>'s prompt_builder.py, but our local

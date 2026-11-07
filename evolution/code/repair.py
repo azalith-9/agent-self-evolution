@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from evolution.code.freeze_check import DEFAULT_MIN_RETAIN_RATIO, freeze_violations
-from evolution.code.worktree import WorktreeEnv
+from evolution.code.worktree import NonAuthoritativeRunError, WorktreeEnv
 
 # A proposer maps (module_path, current_source, failing_output) -> fixed source,
 # or None if it could not produce parseable, non-truncated output this round.
@@ -100,20 +100,20 @@ def build_dspy_proposer(lm: object) -> Proposer:
     proposer = dspy.ChainOfThought(_Fix)
 
     def _propose(module_path: str, current_source: str, failing_output: str) -> Optional[str]:
+        with dspy.context(lm=lm):
+            result = proposer(
+                module_path=module_path,
+                current_source=current_source,
+                failing_test_output=failing_output or "(no test output provided)",
+            )
         try:
-            with dspy.context(lm=lm):
-                r = proposer(
-                    module_path=module_path,
-                    current_source=current_source,
-                    failing_test_output=failing_output or "(no test output provided)",
-                )
-            code = _strip_fences(r.fixed_source)
+            code = _strip_fences(result.fixed_source)
             if len(code) < len(current_source) * _TRUNCATION_FLOOR:
                 return None
             ast.parse(code)
-            return code
-        except Exception:
+        except (AttributeError, TypeError, SyntaxError, ValueError):
             return None
+        return code
 
     return _propose
 
@@ -151,6 +151,8 @@ class RepairEngine:
         # Seed the first feedback with the bug's own failing output so round 1
         # has signal, mirroring the probe (blind round-1 fixing fails).
         seed = env.run_test(*visible)
+        if not seed.authoritative:
+            raise NonAuthoritativeRunError("visible-test baseline lacks complete execution evidence")
         last_feedback = seed.output
         rounds: list[RoundRecord] = []
 
@@ -183,9 +185,11 @@ class RepairEngine:
 
             env.write_tool(tool_relpath, candidate)
             run = env.run_test(*visible)
+            if not run.diagnostic_complete:
+                raise NonAuthoritativeRunError("candidate visible-test execution is incomplete")
             rounds.append(RoundRecord(round=rnd, proposed=True, test_passed=run.passed,
                                       output_tail=run.output))
-            if run.passed:
+            if run.passed and run.authoritative:
                 return RepairResult(fixed=True, fixed_round=rnd,
                                     final_source=candidate, rounds=rounds)
             current, last_feedback = candidate, run.output

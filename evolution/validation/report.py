@@ -7,6 +7,7 @@ downstream calibration scripts can use the same parsers.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -151,16 +152,26 @@ def _run_test_command(command: str, cwd: Path, timeout_seconds: float) -> bool:
     (nonzero exit, timeout, FileNotFoundError, OSError) return False —
     the test did not pass is the verdict the caller needs.
     """
+    import tempfile
+    import uuid
+
+    from evolution.core.execution import ExecutionPolicy, ExecutionRequest, prepare_environment
+    from evolution.core.process import run_process
+    from evolution.core.sandbox import SandboxUnavailableError, runtime_read_roots
+
     try:
-        result = subprocess.run(
-            shlex.split(command),
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        with tempfile.TemporaryDirectory(prefix="cl_test_home_") as tmp:
+            home = Path(tmp).resolve()
+            request = ExecutionRequest(
+                argv=shlex.split(command), cwd=cwd.resolve(),
+                env=prepare_environment(kind="candidate", parent=os.environ, home=home, tmpdir=home),
+                policy=ExecutionPolicy(read_roots=runtime_read_roots(), write_roots=[cwd.resolve(), home]),
+                timeout_seconds=timeout_seconds, cleanup_timeout_seconds=2,
+                invocation_id=uuid.uuid4().hex,
+            )
+            result = run_process(request)
+            return result.exit_code == 0 and result.cleanup_complete and not result.timed_out and not result.error
+    except (subprocess.TimeoutExpired, OSError, SandboxUnavailableError):
         return False
 
 

@@ -17,13 +17,13 @@ need to inherit.
 from __future__ import annotations
 
 import logging
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import dspy
 
-logger = logging.getLogger(__name__)
+from evolution.core.config import ProposerMode
 
-ProposerMode = Literal["compression", "balanced", "growth"]
+logger = logging.getLogger(__name__)
 
 
 class _BudgetAwareInstructionProposal(dspy.Signature):

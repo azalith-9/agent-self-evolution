@@ -8,6 +8,7 @@ C) Golden sets — hand-curated JSONL files
 
 import json
 import logging
+import math
 import random
 import re
 from pathlib import Path
@@ -157,16 +158,25 @@ def split_examples(
     input returns an empty dataset. All three ratios are required (no
     defaults) so callers can't drift from EvolutionConfig defaults silently.
     """
+    ratios = (train_ratio, val_ratio, holdout_ratio)
+    if any(not math.isfinite(ratio) or ratio < 0 for ratio in ratios):
+        raise ValueError("split ratios must be finite and nonnegative")
+    ratio_sum = sum(ratios)
+    if ratio_sum <= 0:
+        raise ValueError("at least one split ratio must be positive")
     if not examples:
         return EvalDataset()
 
     shuffled = list(examples)
     random.Random(seed).shuffle(shuffled)
-
     n_total = len(shuffled)
-    ratio_sum = train_ratio + val_ratio + holdout_ratio
-    n_train = max(1, int(n_total * train_ratio / ratio_sum))
-    n_val = max(1, int(n_total * val_ratio / ratio_sum))
+    n_train = int(n_total * train_ratio / ratio_sum)
+    n_val = int(n_total * val_ratio / ratio_sum)
+    if holdout_ratio == 0:
+        if val_ratio > 0:
+            n_val = n_total - n_train
+        else:
+            n_train = n_total
 
     return EvalDataset(
         train=shuffled[:n_train],

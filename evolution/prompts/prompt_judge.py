@@ -222,6 +222,7 @@ def make_memoizing_splice_scorer(
     *,
     install_fn: Callable[[str], None],
     score_fn: Callable[[str], "ScoreResult | float"],
+    verify_fn: Callable[[], None] | None = None,
     lock: Optional[threading.Lock] = None,
 ) -> Callable[[str, str], ScoreResult]:
     """Build ``closed_loop_scorer(task_id, candidate_text) -> float`` that
@@ -253,6 +254,8 @@ def make_memoizing_splice_scorer(
             if state["installed"] != candidate_text:
                 install_fn(candidate_text)
                 state["installed"] = candidate_text
+            if verify_fn is not None:
+                verify_fn()
             return _to_score_result(score_fn(task_id))
 
     return scorer

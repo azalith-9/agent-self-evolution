@@ -137,12 +137,13 @@ class ClosedLoopFeedbackCache:
         # restores this same value rather than 0 to preserve the allowance
         # for downstream get_or_run callers; see force_run's docstring.
         self._iters_since_last_run = self.min_iters
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def record_judge_score(self, score: float) -> None:
         """Track judge scores so the saturation gate can read recent history."""
-        self._judge_history.append(score)
-        self._iters_since_last_run += 1
+        with self._lock:
+            self._judge_history.append(score)
+            self._iters_since_last_run += 1
 
     def should_run(self) -> bool:
         """Saturation gate: fire when the recent window saturates OR a periodic floor is hit.
@@ -155,14 +156,15 @@ class ClosedLoopFeedbackCache:
         Caller is responsible for cache-hit short-circuiting before this —
         a cache hit always returns the cached report regardless of the gate.
         """
-        if self.gate_mode == "always":
-            return True
-        recent = self._judge_history[-self.window_size :]
-        if not recent:
-            return False
-        saturated = min(recent) >= self.saturation_threshold
-        periodic = self._iters_since_last_run >= self.min_iters
-        return saturated or periodic
+        with self._lock:
+            if self.gate_mode == "always":
+                return True
+            recent = self._judge_history[-self.window_size :]
+            if not recent:
+                return False
+            saturated = min(recent) >= self.saturation_threshold
+            periodic = self._iters_since_last_run >= self.min_iters
+            return saturated or periodic
 
     def get_or_run(self, candidate_text: str) -> Optional[ValidationReport]:
         """Return a cached report; on cache miss, fire the validator if the gate is open.
