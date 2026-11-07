@@ -1,10 +1,10 @@
 # 🧬 Agent Self-Evolution
 
-[![tests](https://github.com/jramos/agent-self-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/jramos/agent-self-evolution/actions/workflows/tests.yml)
+[![tests](https://github.com/azalith-9/agent-self-evolution/actions/workflows/tests.yml/badge.svg)](https://github.com/azalith-9/agent-self-evolution/actions/workflows/tests.yml)
 
 **Automated evolution for the skills, prompts, and tool code your agent runs on.**
 
-Agent Self-Evolution proposes better versions of the artifacts your agent depends on — skills, tool descriptions, system prompts, tool implementations — and ships only the ones that prove out against the real agent. A noise-aware deploy gate, a closed-loop behavioral suite, and an executable-test oracle for code separate genuine gains from lucky ones, so your agent improves without ever shipping a regression. No GPU, no training — everything runs via API calls at ~$1–5 per run.
+Agent Self-Evolution proposes changes to the artifacts your agent depends on — skills, tool descriptions, system-prompt sections, tool implementations — and accepts candidates that pass the target-specific gate. Skills and tools use held-out judge scores, with optional real-agent validation; prompt sections use behavioral validation, and code repairs use executable tests. These checks reduce regression risk within the evaluated tasks; they cannot guarantee regression-free deployment. No GPU training is required. Cost depends on the models, dataset, budget, and agent repetitions; real-agent validation can dominate spend.
 
 **Works on any agent framework that emits `SKILL.md` files** — [Hermes Agent](https://github.com/NousResearch/hermes-agent) is the original target; Claude Code and any other `<dir>/<skill>/SKILL.md` layout are supported via a pluggable skill-source abstraction.
 
@@ -12,53 +12,67 @@ Agent Self-Evolution proposes better versions of the artifacts your agent depend
 
 ```mermaid
 flowchart LR
-    A[Read current<br/>skill/prompt/tool] --> B[Generate<br/>eval dataset]
+    A[Read current<br/>skill/tool description] --> B[Generate<br/>eval dataset]
     B --> C[GEPA<br/>Optimizer]
     C --> D[Candidate<br/>variants]
     D --> E1[Synthetic<br/>holdout]
-    D --> E2[Closed-loop<br/>behavioral suite]
-    E1 -. Execution traces .-> C
-    E1 --> F["Dual-signal deploy gate<br/>(synthetic + closed-loop;<br/>CL-primary on synth-tie)"]
+    D -. Optional .-> E2[Closed-loop<br/>behavioral suite]
+    D -. Train/validation traces .-> C
+    E1 --> F["Held-out deploy gate<br/>(dual-signal when configured)"]
     E2 --> F
     F --> G[Best<br/>variant]
-    G --> H[PR against<br/>source repo]
+    G --> H[Write artifacts;<br/>optional apply or PR]
 ```
 
-GEPA reads execution traces to understand *why* things fail, then proposes targeted improvements ([ICLR 2026 Oral](https://arxiv.org/abs/2507.19457), MIT). On top of GEPA the framework adds a **held-out deploy check**, **three-dimensional judge scoring**, and a **closed-loop behavioral suite**, so a candidate that just got lucky on a small eval set can't ship — the argument for why these layers matter is in [docs/framework_advantages.md](docs/framework_advantages.md). A **saturation pre-flight** refuses to spend budget on a baseline with no headroom, and **closed-loop validation** runs the real agent on a task suite to confirm behavior actually shifted (both in the [usage guide](docs/usage.md)).
+This diagram covers skill and tool-description evolution. Prompt sections use behavioral fitness and a behavioral gate; tool code uses iterative test-feedback repair. GEPA reads execution traces to propose targeted improvements ([paper](https://arxiv.org/abs/2507.19457)). The framework adds a **held-out deploy check**, **three-dimensional judge scoring** for skills/tools, and an optional **closed-loop behavioral suite** — the rationale is in [docs/framework_advantages.md](docs/framework_advantages.md). A **saturation pre-flight** can stop a run before search when the baseline lacks usable signal; overrides are available. **Closed-loop validation** runs the real agent on a task suite to measure behavioral changes (both in the [usage guide](docs/usage.md)).
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/jramos/agent-self-evolution.git
+git clone https://github.com/azalith-9/agent-self-evolution.git
 cd agent-self-evolution
 uv sync
 ```
 
-Requires Python `>=3.10,<3.15`. The lockfile uses DSPy 3.4.1 with the LiteLLM
-engine and released GEPA 0.1.4. Install `uv sync --extra miprov2` to enable
+Use Linux or macOS with Git, [uv](https://docs.astral.sh/uv/), and Python `>=3.10,<3.15`
+(CI tests Python 3.10–3.14). The lockfile pins DSPy 3.4.1, LiteLLM 1.82.6,
+and GEPA 0.1.4; the framework explicitly selects DSPy's LiteLLM engine.
+Install `uv sync --extra miprov2` to enable
 the fallback optimizer. See [dependency constraints](docs/dependencies.md)
 for the provider compatibility and upgrade boundaries.
 
-**Evolve a skill with Hermes Agent.** Running Hermes? No env vars — it auto-detects `~/.hermes/config.yaml` for provider, model, and credentials.
+**Evolve an installed skill with Hermes Agent.** Provider/model defaults come from `~/.hermes/config.yaml`, credentials from `~/.hermes/auth.json` or provider environment variables. Skills are discovered under `~/.hermes/hermes-agent/skills/`; set `SKILL_SOURCES_HERMES_REPO` if your checkout is elsewhere. Replace the example skill name with one you have installed.
 
 ```bash
-uv run python -m evolution.skills.evolve_skill --skill github-code-review --iterations 10
+uv run python -m evolution.skills.evolve_skill --skill github-code-review --budget light
 ```
 
-**Evolve a skill with any provider.** Set a standard env var and run:
+**Evolve a local skill with a supported provider.** For a skill at `./skills/my-skill/SKILL.md`, set provider credentials and pass its source directory. Explicit model flags override Hermes defaults; reflection follows the optimizer model. Claude Code plugin-cache skills are also auto-discovered.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-uv run python -m evolution.skills.evolve_skill --skill writing-skills --iterations 10
+uv run python -m evolution.skills.evolve_skill \
+    --skill my-skill --skill-source-dir ./skills --budget light \
+    --optimizer-model anthropic/claude-opus-4-5 --eval-model anthropic/claude-opus-4-5
 ```
 
-**Evolve a Claude Code `CLAUDE.md` convention** — the clearest win: a project-specific convention the base prompt can't know (e.g. "run tests with `./bin/check`, never `pytest`"), driven headlessly and scored by convention adherence (no LLM judge):
+**Evolve a Claude Code `CLAUDE.md` convention.** The bundled convention suite scores wrapper-command adherence without an LLM judge. This backend requires macOS with `sandbox-exec`, the `claude` CLI, and `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, plus provider credentials for GEPA reflection. It refuses to run agent tasks when the OS sandbox is unavailable.
+
+Add a non-empty, named region to your `CLAUDE.md` before running:
+
+```markdown
+<!-- evolve:REPO_CONVENTIONS start -->
+Prefer repository-provided wrappers when available.
+<!-- evolve:REPO_CONVENTIONS end -->
+```
 
 ```bash
 uv run python -m evolution.prompts.evolve_prompt_section \
     --target claude --section REPO_CONVENTIONS --claude-md ./CLAUDE.md \
-    --tasks evolution/validation/suites/claude_conventions.jsonl --agent-model sonnet --apply
+    --tasks evolution/validation/suites/claude_conventions.jsonl --agent-model sonnet
 ```
+
+Add `--apply` to write a passing candidate into `CLAUDE.md`; otherwise the run writes proposal artifacts. The bundled suite uses synthetic fixture repositories; supply your own task suite to evaluate your project's conventions.
 
 Full usage guide for every target (tools, prompts, session-history evals, tuning, shipping) → **[docs/usage.md](docs/usage.md)** · all CLI flags → **[docs/interfaces.md](docs/interfaces.md)** · or run `--help` on any command.
 
@@ -76,17 +90,19 @@ Phases 1–3 are validated as a working *mechanism* (the pipeline runs end-to-en
 
 ## Run Phases Together
 
-Sequence the per-phase evolvers from one run-spec instead of invoking each by hand. The orchestrator runs them in order (skills → tools → prompts → code), isolates each as a subprocess, and writes a JSONL run history + summary to its run root. It is **propose-only**: it never deploys, and opens no PRs unless you pass `--allow-pr`.
+Sequence the per-phase evolvers from one run-spec instead of invoking each by hand. The orchestrator runs phases in the order listed in the spec, isolates each as a subprocess, and writes a JSONL run history + summary to its run root. PR creation requires both a phase's top-level `create_pr: true` and `--allow-pr`. To keep runs **propose-only**, also omit `apply` from phase arguments: the PR switch does not prevent in-place application.
 
 ```bash
-# Validate a run-spec without spending (prints each phase's resolved command):
-python -m evolution.orchestrator --spec examples/orchestrator/sample_run.yaml --dry-run
+# Resolve the template without spending (does not validate target files):
+uv run python -m evolution.orchestrator --spec examples/orchestrator/sample_run.yaml --dry-run
 
-# Run it for real — continue-on-error by default; --only restricts to a subset:
-python -m evolution.orchestrator --spec examples/orchestrator/sample_run.yaml --only skills --only tools
+# Copy the template, then edit run.yaml for your installed targets and data:
+cp examples/orchestrator/sample_run.yaml run.yaml
+# After editing — continue-on-error by default; --only restricts to a subset:
+uv run python -m evolution.orchestrator --spec run.yaml --only skills --only tools
 ```
 
-See [`examples/orchestrator/sample_run.yaml`](examples/orchestrator/sample_run.yaml) for the spec format.
+The [sample run-spec](examples/orchestrator/sample_run.yaml) is a template: its manifest, task, test, and repository paths need replacing before a real run.
 Each phase keeps its artifacts under `phases/<spec-index>/<phase>-<target>/`, so
 repeated targets with different settings retain separate results. The index is
 zero-based, padded to four digits, and remains the same when using `--only` or
@@ -98,32 +114,36 @@ The gate is useful whether or not GEPA generated the candidate. Bring your own c
 
 ```bash
 # "Did my hand-written tool-description change actually help the real agent?"
-# Real-agent A/B with an A/A noise floor, so a within-noise gain can't deploy.
-python -m evolution.validation.closed_loop --tool patch --hermes-repo ~/.hermes/hermes-agent \
+# Requires an installed Hermes CLI and your suite + baseline/evolved tool modules.
+# --noise-aware-gate loads a precomputed suite.jsonl.noise.json A/A sidecar;
+# it does not calibrate one. Missing/degenerate sidecars use zero tolerance.
+uv run python -m evolution.validation.closed_loop --tool patch --hermes-repo ~/.hermes/hermes-agent \
     --tasks suite.jsonl --baseline baseline.py --evolved my_change.py --noise-aware-gate
 
-# "Repair this broken tool from its failing test — and prove the fix isn't gamed."
+# "Repair this broken tool and check held-out behavior + the public surface."
 # Throwaway worktree + isolated venv; held-out split, surface freeze, file scope, regression floor.
 # Test execution is OS-confined where the platform supports it (macOS), and the posture is
 # recorded either way; --require-sandbox refuses to run unconfined.
-python -m evolution.code.evolve_code --repo ~/.hermes/hermes-agent \
+uv run python -m evolution.code.evolve_code --repo ~/.hermes/hermes-agent \
     --tool tools/foo.py --visible-test tests/tools/test_foo_a.py --holdout-test tests/tools/test_foo_b.py
 
 # "What real bugs in this repo's git stream could the loop fix?" ($0, pure git, no LLM)
-python -m evolution.monitor --repo ~/.hermes/hermes-agent
+uv run python -m evolution.monitor --repo ~/.hermes/hermes-agent
 ```
 
-The deploy gate (held-out split, surface freeze, baseline-diff regression floor) is the most reusable thing here: point it at any LLM-authored patch and it resists the specific ways a green test lies.
+The tool-code gate combines held-out tests, surface freeze, and a baseline-diff regression floor to check single-file repairs. Its evidence is limited to the tests and structural checks actually run.
 
 ## Findings
 
-Skill / prompt / tool-description text changes a capable agent's behavior **only where it carries a signal the model can't already infer**. The campaign resolves that into three regimes:
+The local campaigns found the clearest behavioral gains where text supplies **a signal the model cannot already infer**. The findings fall into three regimes:
 
-- **GREEN — non-inferable signal (proven).** An operating convention or project wrapper the agent can't guess: a `CLAUDE.md` region drove adherence to a counter-default wrapper from **0% → 100%** held-out (judge-free oracle, n=10); code repair fixes **~60–74% of real bugs** from a failing test. **This is the product** — install the missing signal; the gate certifies it didn't regress.
-- **NULL — binary-correctness reasoning (a measured cliff).** Where a task is pass/fail and the agent is already competent, there's no room: capable agents bracketed the headroom band from both sides (aced debugging at 1.00; uniformly failed a 13-requirement conjunction at 0.00). The pre-flight detects this and refuses the run.
+- **GREEN — non-inferable signal (observed).** An operating convention or project wrapper the agent can't guess: a `CLAUDE.md` region drove adherence to a counter-default wrapper from **0% → 100%** held-out (judge-free oracle, n=10); test-feedback code repair reached **12/20 and 34/46 bugs (~60–74%) in the Hermes campaigns**. These are majority-of-three-seeds results on harvested bugs, not a general deployment success rate. The convention report also found that a reasonable instruction already saturated its capable-agent baseline, leaving no demonstrated advantage for evolution over that baseline.
+- **NULL — binary-correctness reasoning (a measured cliff).** Two tested substrates bracketed the headroom band from both sides (aced debugging at 1.00; uniformly failed a 13-requirement conjunction at 0.00). Neither produced an intermediate band for testing methodology-skill gains; this does not establish a universal limit on reasoning improvements.
 - **FRONTIER — open-ended generative quality (open).** The regime where "a better prompt yields better output" is most plausible (writing, analysis, review) resists measurement: the LLM judge saturates, and an execution oracle needs a *targeted* task while open-ended quality is intrinsically un-targeted ([reports/frontier_quality_findings.md](reports/frontier_quality_findings.md)).
 
-Two consequences worth stating plainly. Evolution earns no magic on its own — on this corpus GEPA is matched by plain best-of-N resampling, and a population-based evolutionary search (the actual [imbue `darwinian_evolver`](https://github.com/imbue-ai/darwinian_evolver)) was tested at equal budget and **strictly dominated by best-of-N** (6/23 vs 8/23, recovering nothing best-of-N missed), so the value is the **signal + the gate, not the search**. And self-evolution reached deploy-grade traction only under a conjunction — an executable oracle, real headroom, and code repair from failing-test feedback (deploy-reachable **~0.60–0.74**, clearing a pre-registered futility floor) — which a leakage check confirms is *test-feedback repair, not autonomous re-derivation*.
+Two consequences worth stating plainly. Evolution earns no magic on its own — on this corpus GEPA is matched by plain best-of-N resampling, and a population-based evolutionary search (the actual [imbue `darwinian_evolver`](https://github.com/imbue-ai/darwinian_evolver)) was tested at equal candidate budget and recovered **6/23 vs best-of-N's 8/23**, recovering nothing best-of-N missed (overlapping confidence intervals; no statistically significant lead). The Hermes code-repair campaigns found traction under a conjunction — an executable oracle, real headroom, and code repair from failing-test feedback (deploy-reachable **~0.60–0.74**, clearing a pre-registered futility floor) — which a leakage check confirms is *test-feedback repair, not autonomous re-derivation*.
+
+An [external SWE-bench Lite campaign](reports/swebench_external_validity_findings.md) reached **23/53 bugs (43%, Wilson 95% CI 31–57%)** across 12 repositories using the same majority-of-three-seeds criterion. This supports transfer of test-feedback repair to the evaluated single-file bugs, while showing that the Hermes 60–74% rate does not transfer wholesale.
 
 Full evidence, CIs, and validity threats: **[headroom experiments](reports/asymmetry_headroom_experiments_findings.md)** · **[consolidated findings](reports/asymmetry_findings.md)** ([PDF](reports/asymmetry_report.pdf)) · **[frontier-quality](reports/frontier_quality_findings.md)** · **[evolver vs best-of-N](reports/darwinian_evolver_evaluation.md)**.
 
@@ -144,21 +164,28 @@ repairs must preserve the public surface and pass held-out or oracle checks;
 file scope is rechecked after every validation subprocess so modified tests
 cannot be reused as evidence.
 
-Validation restores the original artifact bytes and permissions. Repository-wide
+Closed-loop validation restores its target artifact's bytes and permissions in a
+`finally` block and refuses stale backups after interrupted runs. Claude prompt
+validation injects candidates through a throwaway append-prompt file; only `--apply`
+writes the real `CLAUDE.md`. Repository-wide
 tests are a development check (`uv run pytest tests/ -q`); broader candidate
 benchmarks can be supplied with `--benchmark-cmd`. Shipping controls and the
 human-review boundary are described in the [usage guide](docs/usage.md).
 
+Hermes validation redirects `HOME`/`HERMES_HOME` but does not OS-confine the
+agent. The macOS sandbox used for Claude validation and code tests restricts
+writes outside allowed roots; reads, process execution, and network remain unrestricted.
+
 ## Operating the Sentinel
 
-The code-evolution loop has a **propose-only** front-end: a triage sentinel that scans a target repo's recent git stream for bugs the repair loop could fix, ranks them, and writes a queue. It never evolves code or opens a PR — a human reads the queue and decides what to attempt.
+The code-evolution loop has a **propose-only** front-end: a triage sentinel that scans a target repo's recent git stream for repair candidates, ranks them, and writes a queue. Scanning performs no repair. Explicit `--attempt-top` runs test-feedback repair in throwaway worktrees and annotates the queue; it never deploys or opens a PR. A human reviews the results.
 
 ```bash
 # Scan ($0, pure git, no LLM) — safe to schedule
-python -m evolution.monitor --repo /path/to/target-repo --since-days 90
+uv run python -m evolution.monitor --repo /path/to/target-repo --since-days 90
 
 # Attempt the top candidates (the only step that spends; cost-capped, human-gated)
-python -m evolution.monitor --repo /path/to/target-repo --attempt-top 3 --max-cost-usd 5.0
+uv run python -m evolution.monitor --repo /path/to/target-repo --attempt-top 3 --max-cost-usd 5.0
 ```
 
 See **[docs/operating_the_sentinel.md](docs/operating_the_sentinel.md)** for the queue format, the verdict taxonomy, and an opt-in scheduled scan.
