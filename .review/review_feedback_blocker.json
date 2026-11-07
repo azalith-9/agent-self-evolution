@@ -1,0 +1,61 @@
+{
+  "recorded_at_utc": "2026-11-07T08:06:16.178614+00:00",
+  "status": "blocked_before_implementation",
+  "baseline": "073a7690740e7aa8171d5bf64881a88faac5c3b5",
+  "current_checkout": {
+    "path": "/home/azalith/projects/azalith/agent-self-evolution/worktrees/feat/issue-2-resume-the-existing",
+    "branch": "feat/issue-2-resume-the-existing",
+    "head": "8121557aa9f154fb0f6c93195c454d26c2c7388b",
+    "staged_path_count": 0,
+    "unstaged_tracked_path_count": 0,
+    "index_sha256": "60c435e1abe231be6eaf3ac2b590321d756fe0ed5cc9315fabdf600f4b078e1c",
+    "staged_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "unstaged_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "designated_implementation": {
+    "path": "/home/azalith/projects/azalith/agent-self-evolution/worktrees/feat/issue-1-retry-the-authorized",
+    "branch": "feat/issue-1-retry-the-authorized",
+    "head": "073a7690740e7aa8171d5bf64881a88faac5c3b5",
+    "staged_path_count": 114,
+    "unstaged_tracked_path_count": 0,
+    "index_sha256": "22d327dc692aecc6a90ba246da2c0f7b501316503625cf819fba1228dcd7b03b",
+    "staged_diff_sha256": "df640f1afecad18973f20b160309f6dc07fd0db3afe9d62872588f7dff142d6b",
+    "unstaged_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "shared_checkout": {
+    "path": "/home/azalith/projects/azalith/agent-self-evolution",
+    "branch": "main",
+    "head": "073a7690740e7aa8171d5bf64881a88faac5c3b5",
+    "staged_path_count": 1,
+    "unstaged_tracked_path_count": 0,
+    "index_sha256": "8aaa418e54acdbdd8d729edc948e2cd2605655b9102a7b2ed58fb79ad661465a",
+    "staged_diff_sha256": "d3339b962877d16e3cc53412ed12efe2f174cacdd99959fccfdd8c3e65b24fce",
+    "unstaged_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "blocking_constraint": {
+    "source": "Active developer filesystem permissions",
+    "sandbox_mode": "workspace-write",
+    "approval_policy": "never",
+    "implementation_is_within_writable_roots": false,
+    "required_environment_change": "Provide write access to the designated implementation worktree in a subsequent session.",
+    "relocation_prohibited_by": "docs/howto/review-local-remediation.md, Preserve recovered state"
+  },
+  "fresh_read_only_findings": [
+    "Current HEAD contains documentation changes only; recovered execution modules are absent here.",
+    "Designated implementation retains TestRun.authoritative as diagnostic accounting without containment or independent test authority.",
+    "Designated code gate still consumes authoritative evidence and contains a deploy=True return.",
+    "The original findings ledger and TDD handoff exist in the designated implementation .review directory."
+  ],
+  "changes": [
+    "This blocker record only; no source, tests, staging, recovery files, or shared checkout edits."
+  ],
+  "validation": {
+    "fresh_tests_run": false,
+    "native_probes_run": false,
+    "remediation_certified": false,
+    "deployment_safe_refusal_implemented": false,
+    "integration_package_completed": false,
+    "historical_test_results_recertified": false
+  },
+  "remaining_work": "All requested review remediation, 50 evidenced primary dispositions, supplemental test integration, fresh validation, provenance investigation, independent review, and package delivery remain outstanding."
+}
