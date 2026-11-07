@@ -103,6 +103,8 @@ Used only by the report renderers (`generate_report.py`, `generate_findings_repo
 
 Declared under `[dependency-groups].dev` (PEP 735), so it stays out of the published package's extras. `uv sync` installs it by default; `uv sync --no-dev` skips it.
 
+The dev group also installs `setuptools>=68.0` and `wheel` for the synthetic repository's offline editable-build tests. These are explicit test prerequisites: [Python no longer seeds setuptools into new virtual environments](https://docs.python.org/3/library/venv.html) starting with Python 3.12. The repair harness exposes the selected base environment's dependency paths to the isolated build, without downloading build requirements while repository code executes. A real target must have its own build backend prepared in that base environment before the run.
+
 `pytest-asyncio` is declared but not currently exercised by the test suite (no `@pytest.mark.asyncio` tests). Reserved for future async work.
 
 ## Optional extras

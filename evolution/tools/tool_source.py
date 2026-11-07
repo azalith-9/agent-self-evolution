@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from evolution.core.paths import contained_relative, read_contained, write_contained
+from evolution.core.tool_manifest import normalize_tool_name as _normalize_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +27,6 @@ logger = logging.getLogger(__name__)
 # the character set is restricted to keep sentinel parsing safe (no regex
 # metacharacters, no embedded ``-->``).
 _TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
-
-
-def _normalize_tool_name(name: str) -> str:
-    """Normalize a tool name for collision detection and lookup robustness."""
-    return name.lower().replace("-", "_")
 
 
 class SentinelParseError(ValueError):

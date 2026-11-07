@@ -23,11 +23,6 @@ import tempfile
 from pathlib import Path
 from typing import Protocol
 
-from evolution.prompts.hermes_prompt_source import HermesPromptSource
-from evolution.tools.hermes_source import HermesToolSource
-from evolution.tools.tool_source import ToolManifest
-
-
 class ArtifactInstaller(Protocol):
     """Install (and uninstall) a candidate artifact in the agent's environment."""
 
@@ -82,6 +77,8 @@ class HermesToolDescriptionInstaller:
     """
 
     def __init__(self, hermes_repo: Path, tool_name: str) -> None:
+        from evolution.tools.hermes_source import HermesToolSource
+
         self.hermes_repo = hermes_repo
         self.tool_name = tool_name
         self._source = HermesToolSource(hermes_repo / "tools")
@@ -132,6 +129,9 @@ class HermesToolDescriptionInstaller:
         output ``evolve_tool`` produces and that ``--benchmark-cmd``
         threads through as ``EVOLVED_PATH`` / ``BASELINE_PATH``).
         """
+        from evolution.tools.hermes_source import HermesToolSource
+        from evolution.tools.tool_source import ToolManifest
+
         if artifact_source.suffix == ".json":
             # MCPManifestSource.find_manifest double-resolves relative paths
             # against its root; from_json_file takes the path as given.
@@ -170,6 +170,8 @@ class HermesPromptSectionInstaller:
     """
 
     def __init__(self, hermes_repo: Path, section_name: str) -> None:
+        from evolution.prompts.hermes_prompt_source import HermesPromptSource
+
         self.hermes_repo = Path(hermes_repo)
         self.section_name = section_name
         self._source = HermesPromptSource(self.hermes_repo)

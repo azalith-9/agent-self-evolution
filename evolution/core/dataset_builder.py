@@ -18,9 +18,10 @@ from typing import TYPE_CHECKING, Optional
 import dspy
 
 from evolution.core.config import EvolutionConfig
+from evolution.core.tool_manifest import normalize_tool_name
 
 if TYPE_CHECKING:
-    from evolution.tools.tool_source import ToolManifest
+    from evolution.core.tool_manifest import ToolManifest
 
 logger = logging.getLogger(__name__)
 
@@ -461,11 +462,9 @@ class SyntheticDatasetBuilder:
         compound form (``read_filemap``) are NOT flagged as containing the tool
         name — only standalone occurrences are.
         """
-        from evolution.tools.tool_source import _normalize_tool_name
-
         forbidden_names: set[str] = set()
         for t in manifest.tools:
-            forbidden_names.add(_normalize_tool_name(t.name).lower())
+            forbidden_names.add(normalize_tool_name(t.name))
         forbidden_names.discard("")
 
         # Pre-compile word-boundary patterns once per call.

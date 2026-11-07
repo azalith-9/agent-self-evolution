@@ -112,7 +112,7 @@ def main():
     for skill, ts, run_total, _ in rows:
         print(f"  {skill:<28} {ts:<18} ${run_total:>8.4f}")
     print()
-    print(f"  Per-model totals:")
+    print("  Per-model totals:")
     for model, row in sorted(by_model.items()):
         prompt_total = row["tokens_in_uncached"] + row["tokens_in_cached"]
         hit_rate = (

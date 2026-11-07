@@ -276,16 +276,17 @@ class TestNonInferiorityGate:
         assert result.passed  # would fail under no_regression_only (mean < 0)
 
     def test_zero_tolerance_reduces_to_lower_strictly_above_zero(self):
-        # tolerance=0 → require lower >= 0 (matches Statsig "no regression risk")
         validator = self._validator(tolerance=0.0)
         baseline = "x" * 1000
         evolved = "x" * 800
-        # lower exactly 0 → passes (>= -0)
         result = validator._check_growth_with_quality_gate(
             evolved, baseline, self._bootstrap(mean=0.01, lower=0.0),
         )
+        assert not result.passed
+        result = validator._check_growth_with_quality_gate(
+            evolved, baseline, self._bootstrap(mean=0.01, lower=0.001),
+        )
         assert result.passed
-        # lower slightly negative → fails
         result = validator._check_growth_with_quality_gate(
             evolved, baseline, self._bootstrap(mean=0.01, lower=-0.001),
         )

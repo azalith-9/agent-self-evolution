@@ -69,7 +69,9 @@ def test_confines_writes_to_the_run_root_when_available(tmp_path, monkeypatch):
     env.run_test("tests/test_x.py")
 
     if sys.platform.startswith("linux"):
-        assert Path(seen["args"][0]).name == "bwrap"
+        assert Path(seen["args"][0]).name == "python"
+        assert Path(seen["args"][2]).name == "sandbox_worker.py"
+        assert "bwrap" in [Path(arg).name for arg in seen["args"]]
         assert "--unshare-all" in seen["args"]
         assert "--share-net" not in seen["args"]
         assert str(env._root) in seen["args"]

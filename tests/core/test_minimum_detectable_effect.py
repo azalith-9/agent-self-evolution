@@ -181,14 +181,8 @@ def test_the_diagnostic_never_enters_a_verdict():
             )
 
 
-def test_evolve_code_decision_payload_is_unchanged():
-    """A general regression guard on the code gate's payload shape.
-
-    Kept because it is a genuine golden captured before this work, and the
-    payload's stability is worth pinning -- but note it guards ``evolve_code``,
-    which these diagnostics do not touch. The claim about *this* change is the
-    structural test above.
-    """
+def test_evolve_code_decision_payload_includes_deployment_evidence():
+    """Pin diagnostic outcomes separately from independent deployment evidence."""
     from evolution.code.gate import run_code_gate
     from evolution.code.repair import RepairResult, RoundRecord
     from tests.code.conftest import (

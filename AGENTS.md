@@ -66,7 +66,7 @@ agent-self-evolution/
 └── AGENTS.md            # you are here
 ```
 
-The `evolution/<tier>/` directories form **a clean layering**: `evolution/core/` has no imports from any tier package. Tier packages may import from core but never from each other.
+The five tier packages (`skills`, `tools`, `prompts`, `code`, and `monitor`) use shared infrastructure in `core` and `validation`. Core never imports a tier package, and tier packages never import each other. Validation owns the shared task, report, runner, and installer contracts. Its adapter constructors and standalone CLI entry points are composition boundaries: they import tier-specific sources only when that adapter or CLI is selected, so importing core validation feedback does not load tier adapters.
 
 ## How a run works (5-line summary)
 

@@ -176,6 +176,8 @@ def rejecting_guard(result: CodeGateResult) -> str:
     floor = g.get("floor")
     if floor and floor.get("new_failures"):
         return "floor"
+    if d.get("deployment_verification", {}).get("status") == "unverifiable":
+        return "deployment_verification"
     return "other"
 
 
@@ -294,6 +296,7 @@ def _score(env, candidate, base_src, bug_tests, oracle_failures, candidate_src, 
                            base_src=base_src, candidate_src=candidate_src)
     return {"organism": f"{candidate.tool_path}@{candidate.fix_sha[:10]}", "seed": seed, "arm": arm,
             "bucket": "scored", "deploy": bool(res.deploy), "guard": rejecting_guard(res),
+            "diagnostic_comparison": res.decision.get("diagnostic_comparison", {}),
             "reason": res.reason, "candidate_src": candidate_src}
 
 

@@ -177,7 +177,9 @@ graph TB
     importers --> dataset
 ```
 
-`evolution/core/` has no dependency on `evolution/skills/`, `evolution/tools/`, `evolution/prompts/`, or `evolution/validation/`. The reverse holds: tier packages use core helpers but core never imports from a tier package. `closed_loop_feedback.py` imports `evolution.validation.*` types because it's the integration seam, but the validation subpackage doesn't import from skills/tools/prompts. This keeps the tier-4/5 expansion path open.
+`evolution/core/` and `evolution/validation/` provide shared infrastructure for the five tier packages (`skills`, `tools`, `prompts`, `code`, and `monitor`). Core may use validation's task, report, validator, and runner contracts; it never imports a tier package. Dataset generation consumes the structural `core.tool_manifest.ToolManifest` protocol instead of the concrete tool adapter. Tool-name normalization also lives in core, keeping filtering and manifest lookup consistent.
+
+Validation's installer constructors and standalone CLI entry points are composition boundaries. They load tier-specific sources lazily when an adapter or CLI is selected. Importing core feedback or shared validation contracts therefore does not load prompt or tool adapters. This distinguishes the shared validator from the tier-specific sources it can install and avoids eager circular imports without moving the public validation APIs.
 
 The `prompts` tier (Phase 3) is the prompt-section evolution path: `evolve_prompt_section` wraps a named section as a `PromptModule` (a passthrough predictor carrying the candidate in sentinel-delimited instructions), mutates it with `PromptSectionProposer`, and — because there is no synthetic classification signal for a system-prompt section — scores **purely behaviorally** through the closed-loop validator running a real agent against a curated JSONL suite. The deploy gate is therefore a closed-loop pass-rate / win-loss decision, not a paired-bootstrap one. Unlike the skill/tool tiers it reuses `ClosedLoopValidator` directly rather than going through `closed_loop_feedback.py`.
 

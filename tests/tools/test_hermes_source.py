@@ -311,10 +311,10 @@ class TestApplyEvolved:
         original_text = target_file.read_text()
         files_before = set(hermes_fixture_copy.iterdir())
 
-        def boom(src, dst):
+        def boom(src, dst, **kwargs):
             raise OSError("simulated replace failure")
 
-        monkeypatch.setattr("evolution.tools.hermes_source.os.replace", boom)
+        monkeypatch.setattr("evolution.core.paths.os.replace", boom)
 
         with pytest.raises(OSError, match="simulated replace failure"):
             source.apply_evolved(

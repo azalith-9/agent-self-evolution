@@ -176,13 +176,20 @@ def run_campaign(
         for index, line in enumerate(lines):
             try:
                 row = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                if index == len(lines) - 1 and not line.endswith(b"\n") and line.lstrip().startswith(b'{"status":'):
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                if (index == len(lines) - 1 and not line.endswith(b"\n")
+                        and line.lstrip().startswith(b"{")
+                        and not (isinstance(exc, json.JSONDecodeError) and exc.msg == "Extra data")):
                     with ledger_path.open("r+b") as ledger:
                         ledger.truncate(valid_bytes)
                     break
                 raise ValueError(f"corrupt campaign ledger record {index + 1}") from None
             valid_bytes += len(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"campaign ledger record {index + 1} must be an object")
+            if index == len(lines) - 1 and not line.endswith(b"\n"):
+                with ledger_path.open("ab") as ledger:
+                    ledger.write(b"\n")
             if row.get("status") not in {"run_inconclusive", "worktree_failed"}:
                 done.add(row["fix_sha"])
             if row.get("status") == "organism":

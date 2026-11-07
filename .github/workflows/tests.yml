@@ -36,7 +36,7 @@ jobs:
         run: uv sync --locked
 
       - name: Run ruff check
-        run: uv run --no-sync ruff check evolution tests
+        run: uv run --no-sync ruff check evolution tests scripts generate_*.py
 
   test:
     runs-on: ubuntu-latest

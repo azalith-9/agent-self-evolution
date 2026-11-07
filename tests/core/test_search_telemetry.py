@@ -152,4 +152,3 @@ def test_summarize_groups_by_artifact_type(tmp_path):
     out = summarize_ledger(tmp_path / LEDGER_NAME)
     assert "skill" in out and "tool" in out
     assert "2" in out  # 2 skill runs
-

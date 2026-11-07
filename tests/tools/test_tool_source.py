@@ -189,18 +189,16 @@ class TestMCPManifestSourceApplyEvolved:
         assert after.get("_evolution_metadata") == before.get("_evolution_metadata")
 
     def test_apply_evolved_writes_atomically_on_failure(self, tmp_path: Path, monkeypatch):
-        import evolution.tools.tool_source as ts_mod
-
         src = FIXTURES / "multiple_tools.json"
         dst = tmp_path / "manifest.json"
         dst.write_text(src.read_text())
         original_bytes = dst.read_bytes()
         files_before = set(tmp_path.iterdir())
 
-        def boom(src_path, dst_path):
+        def boom(src_path, dst_path, **kwargs):
             raise OSError("simulated replace failure")
 
-        monkeypatch.setattr(ts_mod.os, "replace", boom)
+        monkeypatch.setattr("evolution.core.paths.os.replace", boom)
 
         source = MCPManifestSource(tmp_path)
         manifest = source.find_manifest(dst)
