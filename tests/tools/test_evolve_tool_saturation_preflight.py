@@ -57,7 +57,13 @@ class TestSaturationPreflightCLI:
             "evolution.tools.evolve_tool.saturation_preflight"
         ) as mock_preflight, patch(
             "evolution.tools.evolve_tool._preflight_lm_credentials"
-        ), patch("evolution.tools.evolve_tool.dspy.GEPA"):
+        ), patch(
+            "evolution.tools.evolve_tool.SyntheticDatasetBuilder.generate_tool_selection",
+            return_value=_fake_tool_examples(),
+        ), patch(
+            "evolution.tools.evolve_tool.dspy.GEPA",
+            side_effect=RuntimeError("stop after saturation check"),
+        ) as mock_optimizer:
             runner = CliRunner()
             runner.invoke(
                 evolve_tool_main,
@@ -65,6 +71,7 @@ class TestSaturationPreflightCLI:
                  "--iterations", "1", "--no-saturation-check", "--no-preflight"],
             )
             mock_preflight.assert_not_called()
+            mock_optimizer.assert_called_once()
 
     def test_healthy_band_does_not_prompt(self, manifest_dir):
         """When preflight returns healthy: no prompt AND GEPA actually runs.

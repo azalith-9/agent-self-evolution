@@ -176,32 +176,92 @@ _CONV_INSPECTORS = frozenset({
     "head", "tail", "ls", "find", "stat", "file", "wc", "true", ":",
 })
 _CONV_HELP_FLAGS = frozenset({"--help", "-h", "--version", "-V"})
-_CONV_OPERATORS = frozenset({"&&", "||", ";", "|", "&"})
 _CONV_ENV_ASSIGN = re.compile(r"^\w+=")
 _CONV_TAIL = r"(?![A-Za-z0-9_.\-])"
 
 
-def _conv_tokenize(text: str) -> list[str]:
-    try:
-        return shlex.split(text, posix=True)
-    except ValueError:  # unbalanced quotes etc. — degrade to whitespace split
-        return text.split()
+def _conv_heredoc_end(
+    command: str, start: int, delimiters: list[tuple[str, bool]],
+) -> int | None:
+    """Find the end of pending heredoc bodies, whose lines are shell input data."""
+    for delimiter, strip_tabs in delimiters:
+        while start < len(command):
+            end = command.find("\n", start)
+            if end == -1:
+                end = len(command)
+            line = command[start:end]
+            start = min(end + 1, len(command))
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+        else:
+            return None
+    return start
 
 
 def _conv_segments(command: str) -> list[list[str]]:
     """Split a command into segments (token lists) on shell operators, quote-aware
     (operators inside quotes stay part of their token)."""
     segments: list[list[str]] = []
-    current: list[str] = []
-    for tok in _conv_tokenize(command):
-        if tok in _CONV_OPERATORS:
-            if current:
-                segments.append(current)
-                current = []
-        else:
-            current.append(tok)
-    if current:
-        segments.append(current)
+    quote: str | None = None
+    escaped = False
+    comment = False
+    heredocs: list[tuple[str, bool]] = []
+    start = 0
+    redirection_end = 0
+    for index, char in enumerate(command):
+        if index < start or index < redirection_end:
+            continue
+        if comment and char != "\n":
+            continue
+        if comment:
+            comment = False
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote is not None:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (index == start or command[index - 1].isspace()):
+            comment = True
+        elif command.startswith("<<<", index):
+            redirection_end = index + 3
+        elif command.startswith("<<", index):
+            strip_tabs = command.startswith("<<-", index)
+            header = command[index + 2 + int(strip_tabs):].split("\n", 1)[0]
+            lexer = shlex.shlex(header, posix=True, punctuation_chars=";&|<>")
+            lexer.whitespace_split = True
+            try:
+                delimiter = lexer.get_token()
+            except ValueError:
+                return []
+            if not delimiter or delimiter in {";", "&", "|", "<", ">"}:
+                return []
+            heredocs.append((delimiter, strip_tabs))
+        elif char in ";&|\n":
+            try:
+                tokens = shlex.split(command[start:index], comments=True, posix=True)
+            except ValueError:
+                return []
+            if tokens:
+                segments.append(tokens)
+            start = index + 1
+            if char == "\n" and heredocs:
+                body_end = _conv_heredoc_end(command, start, heredocs)
+                if body_end is None:
+                    return []
+                start = body_end
+                heredocs.clear()
+    if heredocs:
+        return []
+    try:
+        tokens = shlex.split(command[start:], comments=True, posix=True)
+    except ValueError:
+        return []
+    if tokens:
+        segments.append(tokens)
     return segments
 
 
@@ -497,6 +557,28 @@ class ValidationReport:
         )
         for r in self.decision_reasons:
             c.print(f"  • {r}")
+
+
+class IncompleteValidationError(RuntimeError):
+    """A validation arm lacked task evidence required for deployment."""
+
+
+def require_complete_validation(report: ValidationReport) -> None:
+    """Require scored tasks on both arms before using a report to deploy.
+
+    Abstentions remain ties in diagnostic reports; a deploy gate must not treat
+    missing execution evidence as a successful no-regression result.
+    """
+    issues: list[str] = []
+    for name, phase in (("baseline", report.baseline), ("evolved", report.evolved)):
+        if not phase.tasks:
+            issues.append(f"{name}: no tasks scored")
+            continue
+        abstained = [task.task_id for task in phase.tasks if task.abstained]
+        if abstained or phase.n_abstained:
+            issues.append(f"{name}: abstained tasks {', '.join(abstained) or phase.n_abstained}")
+    if issues:
+        raise IncompleteValidationError("; ".join(issues))
 
 
 def _cell(result: Optional[TaskResult]) -> str:

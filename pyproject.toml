@@ -15,7 +15,7 @@ authors = [
 keywords = ["llm", "optimization", "evolution", "dspy", "gepa", "agent", "skill"]
 
 dependencies = [
-    "dspy>=3.2.0,<3.3",
+    "dspy[litellm]>=3.2.0,<3.3",
     # Pinned to PR-304 merge SHA for the acceptance_criterion API; swap to
     # a PyPI version when 0.1.2 ships (latest released 0.1.1 predates the merge).
     "gepa @ git+https://github.com/gepa-ai/gepa.git@5e24ee5c8e1857a62a1ba19731de9da45ffb6f1b",

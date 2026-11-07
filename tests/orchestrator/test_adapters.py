@@ -40,15 +40,15 @@ class TestSkillsAdapter:
 
     def test_argv_has_skill_and_output_dir_no_pr_by_default(self):
         ps = PhaseSpec("skills", "demo", {"iterations": 8}, create_pr=False)
-        argv = self.adapter.build_argv(ps, Path("/run"))
+        argv = self.adapter.build_argv(ps, Path("/run"), spec_index=0)
         assert argv[:5] == [sys.executable, "-m", "evolution.skills.evolve_skill", "--skill", "demo"]
-        assert _arg_value(argv, "--output-dir") == "/run/phases/skills-demo"
+        assert _arg_value(argv, "--output-dir") == "/run/phases/0000/skills-demo"
         # Explicit off-switch on the strip path (not mere omission).
         assert "--no-create-pr" in argv and "--create-pr" not in argv
 
     def test_create_pr_emits_create_pr(self):
         ps = PhaseSpec("skills", "demo", {}, create_pr=True)
-        argv = self.adapter.build_argv(ps, Path("/run"))
+        argv = self.adapter.build_argv(ps, Path("/run"), spec_index=0)
         assert "--create-pr" in argv and "--no-create-pr" not in argv
 
     def test_required_fields_just_name(self):
@@ -64,16 +64,16 @@ class TestCodeAdapter:
             {"repo": "/r", "visible_test": "v", "holdout_test": "h", "repair_rounds": 5},
             create_pr=False,
         )
-        argv = self.adapter.build_argv(ps, Path("/run"))
+        argv = self.adapter.build_argv(ps, Path("/run"), spec_index=2)
         assert _arg_value(argv, "--tool") == "hermes/tools/x.py"
         assert _arg_value(argv, "--repo") == "/r"
         assert "--no-create-pr" in argv and "--create-pr" not in argv
-        assert _arg_value(argv, "--output-dir") == "/run/phases/code-hermes_tools_x.py"
+        assert _arg_value(argv, "--output-dir") == "/run/phases/0002/code-hermes_tools_x.py"
 
     def test_create_pr_emits_create_pr(self):
         ps = PhaseSpec("code", "x.py", {"repo": "/r", "visible_test": "v", "holdout_test": "h"},
                        create_pr=True)
-        argv = self.adapter.build_argv(ps, Path("/run"))
+        argv = self.adapter.build_argv(ps, Path("/run"), spec_index=0)
         assert "--create-pr" in argv and "--no-create-pr" not in argv
 
     def test_required_fields(self):
@@ -86,6 +86,6 @@ class TestPromptsAdapter:
     def test_no_create_pr_flag_ever(self):
         adapter = PHASE_ADAPTERS["prompts"]
         ps = PhaseSpec("prompts", "sec", {"tasks": "t.jsonl"}, create_pr=False)
-        argv = adapter.build_argv(ps, Path("/run"))
+        argv = adapter.build_argv(ps, Path("/run"), spec_index=0)
         assert "--create-pr" not in argv and "--no-create-pr" not in argv
         assert adapter.supports_create_pr is False

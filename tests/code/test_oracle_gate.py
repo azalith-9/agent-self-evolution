@@ -10,6 +10,8 @@ tests; that needs the fuzzed differential, deferred.)
 
 from pathlib import Path
 
+import pytest
+
 from evolution.code.gate import run_code_oracle_gate
 from evolution.code.repair import RepairResult, RoundRecord
 from tests.code.conftest import StagedRepo
@@ -145,3 +147,39 @@ def test_pass_to_pass_envflaky_excluded():
         bug_tests=("t.py::a",), oracle_failures=frozenset({"p::flaky"}), base_src=_GOOD,
         repair_result=_rep(), pass_to_pass=("p::flaky",))
     assert r.deploy is True
+
+
+@pytest.mark.parametrize("mutation_stage", ["bug", "oracle", "repaired_floor", "base_floor"])
+def test_oracle_rejects_test_mutation_after_every_run(tmp_path, monkeypatch, mutation_stage):
+    repo = _repo(tmp_path)
+    repo.write_tool(TOOL, FIXED)
+    real_failures = repo.failing_tests
+    real_run = repo.run_test
+    stages = []
+
+    def mutate(stage):
+        stages.append(stage)
+        if stage == mutation_stage:
+            repo.write(TEST, "def test_replaced():\n    assert True\n")
+
+    def failing_tests(*ids):
+        result = real_failures(*ids)
+        mutate("bug" if ids == BUG_TESTS else "oracle")
+        return result
+
+    def run_test(*paths, **kwargs):
+        result = real_run(*paths, **kwargs)
+        if paths == ("tests/tools",):
+            mutate("base_floor" if "repaired_floor" in stages else "repaired_floor")
+        return result
+
+    monkeypatch.setattr(repo, "failing_tests", failing_tests)
+    monkeypatch.setattr(repo, "run_test", run_test)
+    result = _gate(repo, _fixed(FIXED), floor_paths=("tests/tools",))
+
+    assert not result.deploy
+    assert result.decision["decision"] == "incorrect"
+    assert "test file was modified" in result.reason
+    assert not result.decision["guards"]["file_scope_ok"]
+    assert stages[-1] == mutation_stage
+    assert repo.read_tool(TOOL) == FIXED

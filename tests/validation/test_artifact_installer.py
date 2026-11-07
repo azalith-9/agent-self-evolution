@@ -14,7 +14,32 @@ from pathlib import Path
 
 import pytest
 
-from evolution.validation.artifact_installer import HermesToolDescriptionInstaller
+from evolution.validation.artifact_installer import (
+    HermesToolDescriptionInstaller,
+    atomic_write_bytes,
+)
+
+
+class TestAtomicWriteBytes:
+    @pytest.mark.parametrize("mode", [0o644, 0o755])
+    def test_preserves_existing_permissions(self, tmp_path: Path, mode: int) -> None:
+        target = tmp_path / "artifact.py"
+        target.write_bytes(b"old")
+        target.chmod(mode)
+
+        atomic_write_bytes(target, b"new")
+
+        assert target.read_bytes() == b"new"
+        assert target.stat().st_mode & 0o777 == mode
+
+    def test_explicit_mode_restores_original_permissions(self, tmp_path: Path) -> None:
+        target = tmp_path / "artifact.py"
+        target.write_bytes(b"changed")
+        target.chmod(0o600)
+
+        atomic_write_bytes(target, b"original", mode=0o755)
+
+        assert target.stat().st_mode & 0o777 == 0o755
 
 
 # ---- Hermes .py fixture ----

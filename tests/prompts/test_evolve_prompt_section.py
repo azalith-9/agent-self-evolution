@@ -313,6 +313,28 @@ def test_baseline_override_file_replaces_live_section(tmp_path):
 
 
 class TestPromptBuilderGuard:
+    @pytest.mark.parametrize("raise_error", [False, True])
+    def test_restores_permissions(self, tmp_path: Path, raise_error: bool) -> None:
+        target = tmp_path / "pb.py"
+        target.write_text("ORIGINAL = 1\n")
+        target.chmod(0o755)
+
+        def mutate() -> None:
+            with _prompt_builder_guard(target):
+                target.write_text("MUTATED = 2\n")
+                target.chmod(0o600)
+                if raise_error:
+                    raise RuntimeError("boom")
+
+        if raise_error:
+            with pytest.raises(RuntimeError, match="boom"):
+                mutate()
+        else:
+            mutate()
+
+        assert target.read_text() == "ORIGINAL = 1\n"
+        assert target.stat().st_mode & 0o777 == 0o755
+
     def test_restores_bytes_even_on_exception(self, tmp_path):
         target = tmp_path / "pb.py"
         target.write_text("ORIGINAL = 1\n")
@@ -357,6 +379,89 @@ def test_rejects_single_task_suite(tmp_path):
             section_name="MEMORY_GUIDANCE", hermes_repo=repo, tasks_path=suite,
             dry_run=True, output_dir=tmp_path / "out",
         )
+
+
+@pytest.mark.parametrize("compile_floor", [False, True])
+@pytest.mark.parametrize("partial", [False, True])
+def test_incomplete_validation_aborts_before_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compile_floor: bool, partial: bool,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from dspy.utils import DummyLM
+
+    import evolution.prompts.evolve_prompt_section as mod
+    from evolution.validation.artifact_installer import HermesPromptSectionInstaller
+    from evolution.validation.report import (
+        TaskResult,
+        ValidationReport,
+        compute_win_loss,
+        summarize_phase,
+    )
+
+    repo = _fake_repo(tmp_path)
+    target = repo / "agent" / "prompt_builder.py"
+    original = target.read_bytes()
+    suite = tmp_path / "conventions.jsonl"
+    suite.write_text("\n".join(json.dumps({
+        "task_id": f"t{i}", "user_message": "check the project",
+        "expected_action": "convention", "required_cmd_substr": ["bin/check"],
+    }) for i in range(4)) + "\n")
+    installer = HermesPromptSectionInstaller(repo, "MEMORY_GUIDANCE")
+    deploy = Mock()
+    backend = SimpleNamespace(
+        baseline_text="Save durable facts about the user.",
+        deploy_target=target, installer=installer,
+        runner=_ScriptedRunner([AgentRunResult(
+            tool_calls_seq=["Bash"], final_text_tail="", duration_seconds=0,
+            tool_calls_with_args=[{"name": "Bash", "arguments": {"command": "./bin/check"}}],
+        )]),
+        install_candidate=installer.install_text, deploy=deploy,
+    )
+    monkeypatch.setattr(mod, "build_backend", lambda *args, **kwargs: backend)
+    monkeypatch.setattr(
+        mod, "instantiate_lm", lambda *args, **kwargs: DummyLM([
+            {"reasoning": "placeholder", "response": "ok"} for _ in range(20)
+        ]),
+    )
+
+    def validate(inputs):
+        baseline_tasks = [TaskResult(
+            task_id=task.task_id, passed=True, abstained=False,
+            tool_calls_seq=[], duration_seconds=0,
+        ) for task in inputs.suite.tasks]
+        evolved_tasks = [TaskResult(
+            task_id=task.task_id, passed=partial and index == 0,
+            abstained=not (partial and index == 0), tool_calls_seq=[], duration_seconds=0,
+        ) for index, task in enumerate(inputs.suite.tasks)]
+        baseline = summarize_phase(baseline_tasks)
+        evolved = summarize_phase(evolved_tasks)
+        return ValidationReport(
+            schema_version="1", tool="MEMORY_GUIDANCE", task_suite_path=str(suite),
+            task_suite_sha256=inputs.suite.sha256, baseline=baseline, evolved=evolved,
+            delta=compute_win_loss(baseline, evolved), decision="pass", decision_reasons=[],
+        )
+
+    gate_validator = Mock()
+    gate_validator.validate.side_effect = validate
+    monkeypatch.setattr(mod, "ClosedLoopValidator", lambda **kwargs: gate_validator)
+    monkeypatch.setenv("SKILL_SOURCES_HERMES_REPO", str(tmp_path / "missing-hermes"))
+    out = tmp_path / "out"
+
+    result = evolve_prompt_section(
+        section_name="MEMORY_GUIDANCE", hermes_repo=repo, tasks_path=suite,
+        output_dir=out, iterations=1, gepa_minibatch_size=1,
+        optimizer_model="openai/test", eval_model="openai/test",
+        skip_saturation_check=True, compile_floor=compile_floor, apply=True,
+    )
+
+    assert result == {"decision": "aborted", "reason": "cl_eval_incomplete"}
+    decision = json.loads((out / "gate_decision.json").read_text())
+    assert decision["decision"] == "aborted"
+    assert decision["validation_stage"] == ("compiled_floor" if compile_floor else "evolved")
+    deploy.assert_not_called()
+    assert target.read_bytes() == original
 
 
 class TestValSignalWarning:

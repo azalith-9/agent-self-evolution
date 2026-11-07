@@ -18,6 +18,7 @@ import ast
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Protocol
@@ -301,16 +302,21 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def atomic_write_bytes(path: Path, data: bytes) -> None:
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
     """Atomic file write — same primitive HermesToolSource uses internally.
     Crash mid-write leaves the original file intact (or absent), never
-    half-written.
+    half-written. Existing permissions are preserved unless ``mode`` is given.
     """
+    if mode is None and path.exists():
+        mode = stat.S_IMODE(path.stat().st_mode)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, suffix=path.suffix)
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+            if mode is not None:
+                fh.flush()
+                os.fchmod(fh.fileno(), mode)
         os.replace(tmp_path, path)
     except BaseException:
         tmp_path.unlink(missing_ok=True)

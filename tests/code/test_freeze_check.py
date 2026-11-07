@@ -62,6 +62,18 @@ class TestSurfaceDrift:
         )
         assert any("signature of 'do_thing' changed" in r for r in reasons)
 
+    def test_swapping_keyword_only_default_changes_signature(self):
+        before = "def run(*, required, optional=1):\n    return required + optional\n"
+        after = "def run(*, required=1, optional):\n    return required + optional\n"
+
+        assert freeze_violations(before, after) == ["signature of 'run' changed"]
+
+    def test_keyword_only_default_value_change_is_allowed(self):
+        before = "def run(*, required, optional=1):\n    return required + optional\n"
+        after = before.replace("optional=1", "optional=2")
+
+        assert freeze_violations(before, after) == []
+
     def test_removed_schema_is_drift(self):
         no_schema = _BASE.replace('TOOL_SCHEMA = {"name": "do_thing"}\n', "")
         reasons = surface_drift(

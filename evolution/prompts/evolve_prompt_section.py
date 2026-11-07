@@ -20,6 +20,7 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import stat
 import sys
 import tempfile
 import threading
@@ -70,7 +71,11 @@ from evolution.prompts.prompt_module import PromptModule, _extract_from_sentinel
 from evolution.prompts.prompt_proposer import PromptSectionProposer
 from evolution.validation.agent_runner import AgentRunner, TaskRunContext
 from evolution.validation.artifact_installer import atomic_write_bytes
-from evolution.validation.report import score_task
+from evolution.validation.report import (
+    IncompleteValidationError,
+    require_complete_validation,
+    score_task,
+)
 from evolution.validation.task import Task, TaskSuite, split_train_holdout
 from evolution.validation.validator import (
     ClosedLoopValidator,
@@ -204,11 +209,12 @@ def _prompt_builder_guard(target_path: Path) -> Iterator[None]:
                 f"Another harness run holds {target_path.parent / _LOCK_FILENAME}. "
                 f"Wait for it to finish."
             ) from exc
+        original_mode = stat.S_IMODE(target_path.stat().st_mode)
         atomic_write_bytes(backup_path, target_path.read_bytes())
         try:
             yield
         finally:
-            atomic_write_bytes(target_path, backup_path.read_bytes())
+            atomic_write_bytes(target_path, backup_path.read_bytes(), mode=original_mode)
             backup_path.unlink(missing_ok=True)
     finally:
         fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
@@ -673,10 +679,12 @@ def evolve_prompt_section(
                 probe_suite = TaskSuite(
                     path=suite.path, sha256=suite.sha256, tasks=tuple(holdout_tasks)
                 )
+                validation_stage = "compiled_floor"
                 probe = floor_validator.validate(ValidationInputs(
                     tool_name=section_name, suite=probe_suite,
                     baseline_artifact=base_file, evolved_artifact=plus_file,
                 ))
+                require_complete_validation(probe)
                 base_score = probe.baseline.pass_rate
                 floor_score = probe.evolved.pass_rate
                 for line in floor_comparison_lines(base_score, floor_score, len(holdout_tasks)):
@@ -713,12 +721,14 @@ def evolve_prompt_section(
             reps=gate_reps,
             noise_aware=noise_aware_gate,
         )
+        validation_stage = "evolved"
         report = validator.validate(ValidationInputs(
             tool_name=section_name,
             suite=holdout_suite,
             baseline_artifact=baseline_file,
             evolved_artifact=evolved_file,
         ))
+        require_complete_validation(report)
         # Floor fallback: the floor probe (when --compile-floor ran) scored
         # baseline-vs-baseline+floor on these SAME holdout tasks under the same
         # noise-aware rule, so probe.decision is the floor's verdict on the same
@@ -753,6 +763,20 @@ def evolve_prompt_section(
             if choice == "floor"
             else evolved_text
         )
+    except IncompleteValidationError as exc:
+        console.print(f"[red]✗ Incomplete {validation_stage} validation: {exc}[/red]")
+        write_gate_decision(output_dir, {
+            "schema_version": _GATE_SCHEMA_VERSION,
+            "decision": "aborted",
+            "reason": "cl_eval_incomplete",
+            "decision_signal": "closed_loop",
+            "validation_stage": validation_stage,
+            "validation_error": str(exc),
+            "run_inputs": run_inputs,
+            "pr_created": disabled_pr_block(),
+            **section_payload,
+        })
+        return {"decision": "aborted", "reason": "cl_eval_incomplete"}
     except CostCeilingExceeded as exc:
         console.print(f"[red]✗ Cost ceiling exceeded: {exc}[/red]")
         write_gate_decision(output_dir, {

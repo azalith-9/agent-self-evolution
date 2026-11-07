@@ -82,6 +82,9 @@ python -m evolution.orchestrator --spec examples/orchestrator/sample_run.yaml --
 ```
 
 See [`examples/orchestrator/sample_run.yaml`](examples/orchestrator/sample_run.yaml) for the spec format.
+Each phase keeps its artifacts under `phases/<spec-index>/<phase>-<target>/`, so
+repeated targets with different settings retain separate results. The index is
+zero-based and remains the same when using `--only` or `--resume`.
 
 ## Use the Gate Without Evolution
 

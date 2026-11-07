@@ -111,6 +111,38 @@ class TestClosedLoopValidatorLayer2:
         assert report.evolved.pass_rate == 0.0
 
 
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_validation_restores_original_permissions(tmp_path: Path, raise_error: bool) -> None:
+    target = tmp_path / "tool.py"
+    target.write_bytes(b"original")
+    target.chmod(0o755)
+    baseline = tmp_path / "baseline.txt"
+    baseline.write_bytes(b"baseline")
+    evolved = tmp_path / "evolved.txt"
+    evolved.write_bytes(b"evolved")
+    suite = _write_suite(tmp_path, [{"task_id": "t1", "user_message": "do"}])
+
+    class ChangingRunner:
+        def run(self, ctx: TaskRunContext) -> AgentRunResult:
+            target.chmod(0o600)
+            if raise_error:
+                raise RuntimeError("runner failed")
+            return AgentRunResult(tool_calls_seq=[], final_text_tail="", duration_seconds=0)
+
+    validator = ClosedLoopValidator(_StubInstaller(target), ChangingRunner())
+    inputs = ValidationInputs(
+        tool_name="tool", suite=suite, baseline_artifact=baseline, evolved_artifact=evolved,
+    )
+    if raise_error:
+        with pytest.raises(RuntimeError, match="runner failed"):
+            validator.validate(inputs)
+    else:
+        validator.validate(inputs)
+
+    assert target.read_bytes() == b"original"
+    assert target.stat().st_mode & 0o777 == 0o755
+
+
 class TestClosedLoopValidatorReps:
     """Multi-rep rate-based gating. reps=1 (the default, shared with the
     tool/skill paths) must be byte-for-byte identical to legacy behavior.

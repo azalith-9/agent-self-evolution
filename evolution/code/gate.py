@@ -12,7 +12,8 @@ Checks, cheap-and-decisive first; the first failure rejects:
   2. surface freeze     — no public function/class/signature/schema drift, and
                           the rewrite is within blast-radius bounds (free, AST).
   3. file scope         — the worktree's git diff touches *only* the target tool;
-                          no test file, no other module (cheap git).
+                          no test file, no other module (cheap git). Rechecked
+                          after every test run before its verdict is trusted.
   4. held-out split     — a frozen test the proposer never saw and was never fed
                           back must also pass. This is the anti-gaming core: a
                           fix that teaches to the visible test (hard-codes its
@@ -152,6 +153,21 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _file_scope_violation(env: WorktreeEnv, tool_relpath: str, guards: dict) -> str | None:
+    """Recheck scope after every subprocess, before altered tests can be reused."""
+    changed = [_test_relnorm(p) for p in env.changed_files()]
+    guards["changed_files"] = changed
+    target = _test_relnorm(tool_relpath)
+    offenders = [p for p in changed if p != target]
+    test_touched = [p for p in changed if _is_test_path(p)]
+    guards["file_scope_ok"] = not offenders and not test_touched
+    if test_touched:
+        return f"a test file was modified: {test_touched}"
+    if offenders:
+        return f"files other than the target tool changed: {offenders}"
+    return None
+
+
 def run_code_gate(
     env: WorktreeEnv,
     *,
@@ -216,19 +232,13 @@ def run_code_gate(
         return _reject("freeze/diff-shape violation: " + "; ".join(violations))
 
     # 3. file scope — only the target tool may change; no test file touched
-    changed = [_test_relnorm(p) for p in env.changed_files()]
-    guards["changed_files"] = changed
-    target = _test_relnorm(tool_relpath)
-    offenders = [p for p in changed if p != target]
-    test_touched = [p for p in changed if _is_test_path(p)]
-    guards["file_scope_ok"] = not offenders and not test_touched
-    if test_touched:
-        return _reject(f"a test file was modified: {test_touched}")
-    if offenders:
-        return _reject(f"files other than the target tool changed: {offenders}")
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
 
     # 4. held-out split (the anti-gaming core)
     holdout = env.run_test(holdout_test_relpath)
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
     guards["holdout"] = {"passed": holdout.passed, "exit_code": holdout.exit_code,
                          "duration_seconds": round(holdout.duration_seconds, 2)}
     if holdout.exit_code == _PYTEST_NO_TESTS_COLLECTED:
@@ -257,6 +267,8 @@ def run_code_gate(
     # *introduced*. (`--tb=no` + full_output keeps the FAILED summary complete
     # and parseable.)
     repaired_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
     if repaired_floor.exit_code == _PYTEST_NO_TESTS_COLLECTED:
         decision["floor_output_tail"] = repaired_floor.output[-2000:]
         return _reject(f"regression floor {list(floor_paths)} collected no tests "
@@ -284,6 +296,8 @@ def run_code_gate(
             base_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
         finally:
             env.write_tool(tool_relpath, repaired)  # always restore the repair
+        if scope_error := _file_scope_violation(env, tool_relpath, guards):
+            return _reject(scope_error)
         if not _is_authoritative(base_floor):
             # Worse than useless in the other direction: an empty baseline makes
             # every pre-existing failure look introduced, rejecting a correct
@@ -354,12 +368,14 @@ def _base_source(env: WorktreeEnv, tool_relpath: str) -> str:
 def _baseline_diff_floor(
     env: WorktreeEnv, tool_relpath: str, repaired: str, base_src: str,
     floor_paths: tuple[str, ...],
+    guards: dict,
 ) -> tuple[list[str], dict, str]:
     """Run the regression floor on repaired vs base source; return the failures
     the repair INTRODUCED (not pre-existing), a guard dict, and the repaired
-    output tail. Shared by the campaign's oracle gate; the held-out gate keeps
-    its own inline copy so it stays byte-identical."""
+    output tail. The held-out gate performs the same checks inline."""
     repaired_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        raise CodeGateError(scope_error)
     if repaired_floor.exit_code == _PYTEST_NO_TESTS_COLLECTED:
         return (["<no tests collected>"],
                 {"ran": list(floor_paths), "collected": 0}, repaired_floor.output[-2000:])
@@ -380,6 +396,8 @@ def _baseline_diff_floor(
             base_floor = env.run_test(*floor_paths, extra_args=["--tb=no"], full_output=True)
         finally:
             env.write_tool(tool_relpath, repaired)
+        if scope_error := _file_scope_violation(env, tool_relpath, guards):
+            raise CodeGateError(scope_error)
         if not _is_authoritative(base_floor):
             raise NonAuthoritativeRunError(
                 f"regression floor baseline exited {base_floor.exit_code}; without a "
@@ -472,19 +490,13 @@ def run_code_oracle_gate(
         return _reject("freeze/diff-shape violation: " + "; ".join(violations))
 
     # file scope — only the target tool may change; no test file touched
-    changed = [_test_relnorm(p) for p in env.changed_files()]
-    guards["changed_files"] = changed
-    target = _test_relnorm(tool_relpath)
-    offenders = [p for p in changed if p != target]
-    test_touched = [p for p in changed if _is_test_path(p)]
-    guards["file_scope_ok"] = not offenders and not test_touched
-    if test_touched:
-        return _reject(f"a test file was modified: {test_touched}")
-    if offenders:
-        return _reject(f"files other than the target tool changed: {offenders}")
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
 
     # the bug is actually fixed
     bug_fail = env.failing_tests(*bug_tests)
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
     guards["bug_tests_passed"] = not bug_fail
     if bug_fail:
         return _reject(f"repair does not pass the bug tests: {sorted(bug_fail)[:6]}")
@@ -496,6 +508,8 @@ def run_code_oracle_gate(
     # empty the full test file is the scope (Hermes path, byte-identical to before).
     oracle_scope = pass_to_pass or (test_relpath,)
     new_vs_oracle = sorted(env.failing_tests(*oracle_scope) - set(oracle_failures))
+    if scope_error := _file_scope_violation(env, tool_relpath, guards):
+        return _reject(scope_error)
     guards["oracle_match"] = {"new_vs_oracle": new_vs_oracle,
                               "oracle_failure_count": len(oracle_failures),
                               "oracle_scope_size": len(oracle_scope)}
@@ -506,8 +520,11 @@ def run_code_oracle_gate(
     # optional broad cross-tool regression floor (off by default — oracle-match
     # above is the regression check for a measurement run)
     if floor_paths:
-        new_failures, floor_guard, tail = _baseline_diff_floor(
-            env, tool_relpath, repaired, base_src, floor_paths)
+        try:
+            new_failures, floor_guard, tail = _baseline_diff_floor(
+                env, tool_relpath, repaired, base_src, floor_paths, guards)
+        except CodeGateError as exc:
+            return _reject(str(exc))
         guards["floor"] = floor_guard
         if new_failures:
             decision["floor_output_tail"] = tail

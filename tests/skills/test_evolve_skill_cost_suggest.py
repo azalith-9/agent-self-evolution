@@ -46,7 +46,9 @@ def stub_skill_loader(tmp_path):
     """
     with patch("evolution.skills.evolve_skill.load_skill") as mock_load_skill, \
          patch("evolution.skills.evolve_skill.find_skill") as mock_find, \
-         patch("evolution.core.config.discover_skill_sources") as mock_discover:
+         patch("evolution.core.config.discover_skill_sources") as mock_discover, \
+         patch("evolution.skills.evolve_skill.SyntheticDatasetBuilder.generate",
+               side_effect=RuntimeError("stop after advisor")):
         mock_find.return_value = tmp_path / "fake_skill" / "SKILL.md"
         mock_load_skill.return_value = {
             "name": "fake_skill",

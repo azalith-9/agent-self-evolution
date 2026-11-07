@@ -57,13 +57,13 @@ class PhaseAdapter:
     def required_fields(self) -> frozenset[str]:
         return frozenset({"name", *self.extra_required})
 
-    def output_dir(self, ps: PhaseSpec, run_root: Path) -> Path:
-        return Path(run_root) / "phases" / f"{ps.phase}-{_slug(ps.name)}"
+    def output_dir(self, ps: PhaseSpec, run_root: Path, *, spec_index: int) -> Path:
+        return Path(run_root) / "phases" / f"{spec_index:04d}" / f"{ps.phase}-{_slug(ps.name)}"
 
-    def build_argv(self, ps: PhaseSpec, run_root: Path) -> list[str]:
+    def build_argv(self, ps: PhaseSpec, run_root: Path, *, spec_index: int) -> list[str]:
         argv = [sys.executable, "-m", self.module, self.name_flag, ps.name]
         argv += _flagify(ps.args)
-        argv += ["--output-dir", str(self.output_dir(ps, run_root))]
+        argv += ["--output-dir", str(self.output_dir(ps, run_root, spec_index=spec_index))]
         argv += self._create_pr_flags(ps)
         return argv
 

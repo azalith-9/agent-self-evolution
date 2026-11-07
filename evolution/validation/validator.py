@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import fcntl
 import logging
+import stat
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -126,6 +127,7 @@ class ClosedLoopValidator:
         suite_dir = inputs.suite.path.parent if inputs.suite.path is not None else None
 
         with _exclusive_lock(target.parent):
+            original_mode = stat.S_IMODE(target.stat().st_mode)
             atomic_write_bytes(backup_path, target.read_bytes())
             self.installer.verify_backup(backup_path)
             try:
@@ -140,7 +142,7 @@ class ClosedLoopValidator:
                     suite_dir=suite_dir,
                 )
             finally:
-                atomic_write_bytes(target, backup_path.read_bytes())
+                atomic_write_bytes(target, backup_path.read_bytes(), mode=original_mode)
                 backup_path.unlink(missing_ok=True)
 
         baseline = summarize_phase(baseline_results)

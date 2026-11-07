@@ -8,11 +8,13 @@ import pytest
 
 from evolution.validation.agent_runner import AgentRunResult
 from evolution.validation.report import (
+    IncompleteValidationError,
     PhaseResult,
     TaskResult,
     ValidationReport,
     compute_win_loss,
     decide,
+    require_complete_validation,
     score_task,
     summarize_phase,
 )
@@ -26,6 +28,47 @@ def _tr(task_id: str, *, passed: bool, abstained: bool = False) -> TaskResult:
         tool_calls_seq=["patch"] if passed else ["write_file"],
         duration_seconds=1.0,
     )
+
+
+class TestCompleteValidation:
+    @pytest.mark.parametrize("arm", ["baseline", "evolved"])
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_rejects_abstentions_in_either_arm(self, arm: str, partial: bool) -> None:
+        incomplete = [_tr("errored", passed=False, abstained=True)]
+        if partial:
+            incomplete.append(_tr("scored", passed=True))
+        complete = [_tr(task.task_id, passed=True) for task in incomplete]
+        baseline = summarize_phase(incomplete if arm == "baseline" else complete)
+        evolved = summarize_phase(incomplete if arm == "evolved" else complete)
+        report = ValidationReport(
+            schema_version="1", tool="tool", task_suite_path="suite.jsonl",
+            task_suite_sha256="sha", baseline=baseline, evolved=evolved,
+            delta=compute_win_loss(baseline, evolved), decision="pass", decision_reasons=[],
+        )
+
+        with pytest.raises(IncompleteValidationError, match=f"{arm}.*errored"):
+            require_complete_validation(report)
+
+    def test_allows_scored_failures(self) -> None:
+        phase = summarize_phase([_tr("failed", passed=False)])
+        report = ValidationReport(
+            schema_version="1", tool="tool", task_suite_path="suite.jsonl",
+            task_suite_sha256="sha", baseline=phase, evolved=phase,
+            delta=compute_win_loss(phase, phase), decision="pass", decision_reasons=[],
+        )
+
+        require_complete_validation(report)
+
+    def test_rejects_empty_validation(self) -> None:
+        phase = summarize_phase([])
+        report = ValidationReport(
+            schema_version="1", tool="tool", task_suite_path="suite.jsonl",
+            task_suite_sha256="sha", baseline=phase, evolved=phase,
+            delta=compute_win_loss(phase, phase), decision="pass", decision_reasons=[],
+        )
+
+        with pytest.raises(IncompleteValidationError, match="no tasks"):
+            require_complete_validation(report)
 
 
 class TestScoreTask:

@@ -51,12 +51,12 @@ def _signature_key(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     args = [p.arg for p in a.args]
     kwonly = [p.arg for p in a.kwonlyargs]
     n_defaults = len(a.defaults)
-    n_kw_defaults = sum(1 for d in a.kw_defaults if d is not None)
+    kw_defaults = [d is not None for d in a.kw_defaults]
     star = a.vararg.arg if a.vararg else ""
     starstar = a.kwarg.arg if a.kwarg else ""
     return (
         f"posonly={posonly} args={args} kwonly={kwonly} "
-        f"defaults={n_defaults} kwdefaults={n_kw_defaults} "
+        f"defaults={n_defaults} kwdefaults={kw_defaults} "
         f"*={star} **={starstar}"
     )
 

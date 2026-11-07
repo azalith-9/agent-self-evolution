@@ -7,6 +7,8 @@ base from HEAD) with self-contained tools (real pytest, no venv).
 
 from pathlib import Path
 
+import pytest
+
 from evolution.code.gate import run_code_gate
 from evolution.code.repair import RepairResult, RoundRecord
 from tests.code.conftest import (
@@ -156,3 +158,54 @@ class TestIsTestPath:
         assert not _is_test_path("tools/fuzzy_match.py")
         assert not _is_test_path("tools/attestation.py")  # 'test' is a substring, not a marker
         assert not _is_test_path("pkg/testing/runner.py")  # 'testing/' dir, not 'tests/'
+
+
+class TestGateExecutionIntegrity:
+    def test_candidate_cannot_rewrite_floor_during_holdout(self, tmp_path):
+        repo = _repo(tmp_path)
+        floor = "tests/tools/test_floor.py"
+        repo.write(floor, "def test_floor():\n    assert False\n")
+        repo._git("add", floor)
+        repo._git("commit", "-q", "-m", "add regression floor")
+        candidate = (
+            "import sys\nfrom pathlib import Path\n\n"
+            "def add(a, b):\n"
+            "    if any('test_calc_holdout.py' in arg for arg in sys.argv):\n"
+            "        Path('tests/tools/test_floor.py').write_text("
+            "'def test_floor():\\n    assert True\\n')\n"
+            "    return a + b\n"
+        )
+        repo.write_tool(TOOL, candidate)
+
+        result = _gate(repo, _fixed_result(candidate))
+
+        assert not result.deploy
+        assert "test file was modified" in result.reason
+        assert not result.decision["guards"]["file_scope_ok"]
+        assert floor in result.decision["guards"]["changed_files"]
+        assert "floor" not in result.decision["guards"]
+
+    @pytest.mark.parametrize("mutation_run", ["repaired_floor", "base_floor"])
+    def test_floor_mutation_rejects_before_later_runs(self, tmp_path, monkeypatch, mutation_run):
+        repo = _repo(tmp_path)
+        repo.write_tool(TOOL, FIXED_CALC)
+        real_run = repo.run_test
+        floor_runs = []
+
+        def run_test(*paths, **kwargs):
+            result = real_run(*paths, **kwargs)
+            if paths == ("tests/tools",):
+                stage = "repaired_floor" if not floor_runs else "base_floor"
+                floor_runs.append(stage)
+                if stage == mutation_run:
+                    repo.write(VIS, "def test_replaced():\n    assert True\n")
+            return result
+
+        monkeypatch.setattr(repo, "run_test", run_test)
+        result = _gate(repo, _fixed_result(FIXED_CALC))
+
+        assert not result.deploy
+        assert "test file was modified" in result.reason
+        assert not result.decision["guards"]["file_scope_ok"]
+        assert floor_runs[-1] == mutation_run
+        assert repo.read_tool(TOOL) == FIXED_CALC

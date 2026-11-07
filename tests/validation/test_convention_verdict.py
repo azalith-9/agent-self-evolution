@@ -144,6 +144,10 @@ import pytest as _pytest
     "echo bin/check > run.log",      # writing its name to a file
     "./bin/check --help",            # invoked, but help mode — didn't run the suite
     "bash -c \"echo bin/check\"",    # mentioned inside a -c script body
+    "echo ';' ./bin/check",
+    'echo "&&" ./bin/check',
+    r"echo \; ./bin/check",
+    "echo done # comment; ./bin/check",
 ])
 def test_convention_required_mention_does_not_count_as_used(cmd):
     assert _conv([cmd]) is False
@@ -156,6 +160,11 @@ def test_convention_required_mention_does_not_count_as_used(cmd):
     "bin/check && echo done",
     "env CI=1 ./bin/check",
     "cat input.txt && ./bin/check",  # explore-then-run still counts
+    "echo done; ./bin/check",
+    "echo done&&./bin/check",
+    "echo done\n./bin/check",
+    "echo ';' ; ./bin/check",
+    "echo done # comment; ignored\n./bin/check",
 ])
 def test_convention_required_real_invocation_counts_as_used(cmd):
     assert _conv([cmd]) is True
@@ -195,3 +204,31 @@ def test_convention_forbidden_multitoken_app_invocation():
         required_cmd_substr=("bin/run",), forbidden_cmd_substr=("python app.py",),
     )
     assert passed2 is True  # mention in echo is not a bypass
+
+
+@_pytest.mark.parametrize("delimiter", ["EOF", "'EOF'", '"EOF"'])
+def test_convention_heredoc_body_is_not_an_invocation(delimiter):
+    assert _conv([f"cat <<{delimiter} > notes.txt\n./bin/check\nEOF\n"]) is False
+
+
+@_pytest.mark.parametrize("delimiter", ["EOF", "'EOF'", '"EOF"'])
+def test_convention_heredoc_mentions_do_not_hide_later_wrapper(delimiter):
+    assert _conv([f"cat <<{delimiter}\npytest\nEOF\n./bin/check"]) is True
+
+
+def test_convention_tab_stripping_heredoc_body_is_not_an_invocation():
+    assert _conv(["cat <<-EOF\n\t./bin/check\n\tEOF\n"]) is False
+    assert _conv(["cat <<-EOF\n\tpytest\n\tEOF\n./bin/check"]) is True
+
+
+def test_convention_multiple_heredoc_bodies_are_not_invocations():
+    assert _conv(["cat <<A <<B\n./bin/check\nA\npytest\nB\n"]) is False
+    assert _conv(["cat <<A <<B\n./bin/check\nA\npytest\nB\n./bin/check"]) is True
+
+
+def test_convention_herestring_does_not_hide_forbidden_execution():
+    assert _conv(["./bin/check", 'pytest <<< "input"']) is False
+
+
+def test_convention_wrapper_with_herestring_is_an_invocation():
+    assert _conv(['./bin/check <<< "input"']) is True

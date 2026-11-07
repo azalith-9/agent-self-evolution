@@ -6,6 +6,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from evolution.orchestrator.run import reconcile, run_pipeline
 from evolution.orchestrator.spec import PhaseSpec, RunSpec
 
@@ -56,6 +58,31 @@ def _spec(*phases):
 
 
 class TestSequencer:
+    @pytest.mark.parametrize("names", [("demo", "demo"), ("tools/a.py", "tools_a.py")])
+    def test_each_phase_keeps_its_own_artifacts(self, tmp_path, names):
+        spec = _spec(*(PhaseSpec("skills", name, {"seed": i})
+                       for i, name in enumerate(names)))
+
+        def runner(argv, **kwargs):
+            out = Path(argv[argv.index("--output-dir") + 1])
+            out.mkdir(parents=True)
+            seed = argv[argv.index("--seed") + 1]
+            (out / "evolved_skill.md").write_text(f"candidate {seed}")
+            (out / "gate_decision.json").write_text(json.dumps({"decision": "deploy"}))
+            return 0
+
+        summary = run_pipeline(spec, run_root=tmp_path, phase_runner=runner, clock=_CLOCK)
+
+        dirs = [Path(row["run_dir"]) for row in summary["phases"]]
+        assert dirs[0] != dirs[1]
+        assert [(path / "evolved_skill.md").read_text() for path in dirs] == [
+            "candidate 0", "candidate 1",
+        ]
+        resumed = make_runner()
+        run_pipeline(spec, run_root=tmp_path, phase_runner=resumed, resume=True, clock=_CLOCK)
+        assert resumed.calls == []
+        assert all((path / "evolved_skill.md").exists() for path in dirs)
+
     def test_continue_on_error_runs_later_phases(self, tmp_path):
         spec = _spec(
             PhaseSpec("skills", "demo", {}),

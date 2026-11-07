@@ -138,8 +138,8 @@ def run_pipeline(
         if resume and key in done:
             continue
 
-        run_dir = adapter.output_dir(eff, run_root)
-        argv = adapter.build_argv(eff, run_root)
+        run_dir = adapter.output_dir(eff, run_root, spec_index=spec_index)
+        argv = adapter.build_argv(eff, run_root, spec_index=spec_index)
 
         if dry_run:
             row = _row(run_id=run_id, spec_index=spec_index, ps=eff, status="skipped",
