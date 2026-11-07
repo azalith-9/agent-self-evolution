@@ -37,7 +37,16 @@ def _env(tmp_path, *, require_sandbox=False):
 
 
 def _capture(monkeypatch, *, returncode=0, stdout="1 passed", stderr=""):
-    """Replace the subprocess call so we can inspect the argv run_test builds."""
+    """Capture subprocesses with synthetic, installation-independent backends."""
+    from evolution.core import sandbox
+
+    original_which = sandbox.shutil.which
+    backends = {name: f"/synthetic/bin/{name}" for name in ("bwrap", "sandbox-exec")}
+
+    def which(command: str, *args: object, **kwargs: object) -> str | None:
+        return backends.get(command) or original_which(command, *args, **kwargs)
+
+    monkeypatch.setattr(sandbox.shutil, "which", which)
     seen = {}
 
     def fake_run(args, *, cwd, timeout, env=None):
@@ -69,7 +78,7 @@ def test_confines_writes_to_the_run_root_when_available(tmp_path, monkeypatch):
     env.run_test("tests/test_x.py")
 
     if sys.platform.startswith("linux"):
-        assert Path(seen["args"][0]).name == "python"
+        assert Path(seen["args"][0]) == Path(sys.executable)
         assert Path(seen["args"][2]).name == "sandbox_worker.py"
         assert "bwrap" in [Path(arg).name for arg in seen["args"]]
         assert "--unshare-all" in seen["args"]
@@ -81,6 +90,22 @@ def test_confines_writes_to_the_run_root_when_available(tmp_path, monkeypatch):
         assert f'(subpath "{env._root}")' in profile
         assert "(deny default)" in profile
     assert env.sandboxed is True
+
+
+def test_simulated_containment_does_not_require_installed_backends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("evolution.core.sandbox.shutil.which", lambda *args, **kwargs: None)
+    monkeypatch.setattr("evolution.code.worktree.sandbox_available", lambda: True)
+    env = _env(tmp_path)
+    seen = _capture(monkeypatch)
+
+    run = env.run_test("tests/test_x.py")
+
+    assert run.passed
+    backend = "bwrap" if sys.platform.startswith("linux") else "sandbox-exec"
+    assert f"/synthetic/bin/{backend}" in seen["args"]
+    assert env.containment()["sandboxed"] is True
 
 
 def test_runs_unconfined_and_says_so_when_unavailable(tmp_path, monkeypatch):
