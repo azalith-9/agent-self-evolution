@@ -78,6 +78,39 @@ class CodeGateResult:
     reason: str
     decision: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.deploy = False
+
+    def __getattribute__(self, name: str) -> object:
+        if name == 'deploy':
+            from evolution.code.semantic_verifier import authority_live
+            handle = object.__getattribute__(self, '__dict__').get('_authorization')
+            return handle is not None and authority_live(handle)
+        return object.__getattribute__(self, name)
+
+    @property
+    def export_authorization(self) -> object | None:
+        return getattr(self, '_authorization', None)
+
+    def close(self) -> None:
+        from evolution.code.semantic_verifier import revoke
+        authorization = self.export_authorization
+        if authorization is not None:
+            revoke(authorization)
+            self._authorization = None
+
+    def __enter__(self) -> CodeGateResult:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+    def __copy__(self) -> object:
+        raise TypeError('gate resource ownership cannot be copied')
+
+    def __deepcopy__(self, memo: dict) -> object:
+        raise TypeError('gate resource ownership cannot be copied')
+
 
 def _test_relnorm(path: str) -> str:
     return path.replace("\\", "/").removeprefix("./")
@@ -170,6 +203,7 @@ def run_code_gate(
     floor_paths: tuple[str, ...] = DEFAULT_FLOOR_PATHS,
     min_retain_ratio: float = DEFAULT_MIN_RETAIN_RATIO,
     run_inputs: Optional[dict] = None,
+    verification: object = None,
 ) -> CodeGateResult:
     """Evaluate the repaired worktree and return a deploy/reject decision.
 
@@ -265,7 +299,11 @@ def run_code_gate(
                        f"failure(s): {new_failures[:10]}")
 
     decision["diagnostic_comparison"] = {"status": "passed", "reason": "complete comparable diagnostics"}
-    return _reject(decision["deployment_verification"]["reason"])
+    decision.update(decision='reject', reason=decision['deployment_verification']['reason'])
+    result = CodeGateResult(False, decision['deployment_verification']['reason'], decision)
+    finalize_verification(result, env=env, tool_relpath=tool_relpath,
+                          base_source=base_src, verification=verification)
+    return result
 
 
 def _base_source(env: WorktreeEnv, tool_relpath: str) -> str:
@@ -380,6 +418,7 @@ def run_code_oracle_gate(
     floor_paths: Optional[tuple[str, ...]] = None,
     min_retain_ratio: float = DEFAULT_MIN_RETAIN_RATIO,
     run_inputs: Optional[dict] = None,
+    verification: object = None,
 ) -> CodeGateResult:
     """Oracle-based correctness verdict for the measurement campaign.
 
@@ -490,4 +529,53 @@ def run_code_oracle_gate(
     decision["diagnostic_comparison"] = {"status": "passed", "reason": "complete oracle comparison diagnostics"}
     decision["decision"] = "correct"
     decision["reason"] = decision["deployment_verification"]["reason"]
-    return CodeGateResult(deploy=False, reason=decision["reason"], decision=decision)
+    result = CodeGateResult(deploy=False, reason=decision["reason"], decision=decision)
+    finalize_verification(result, env=env, tool_relpath=tool_relpath,
+                          base_source=base_src, verification=verification)
+    return result
+
+
+def finalize_verification(result: CodeGateResult, *, env: WorktreeEnv, tool_relpath: str,
+                          base_source: str, verification: object = None) -> None:
+    """Final acceptance boundary, invoked after configured benchmarks as well."""
+    from evolution.code.semantic_verifier import (
+        SemanticVerifier, VerificationContext, _CONTEXTS, _gate_prerequisites)
+    from evolution.code.verified_snapshot import ProtectedSnapshot
+    result.close()
+    result.deploy = False
+    result._semantic_audit = None
+    result.reason = 'independent_test_verification_unavailable'
+    result.decision['deployment_verification'] = verify_deployment(env, tool_relpath=tool_relpath)
+    if result.decision.get('decision') == 'deploy':
+        result.decision.update(decision='reject', reason=result.reason)
+    if type(verification) is not VerificationContext or verification not in _CONTEXTS:
+        return
+    if result.decision.get('diagnostic_comparison', {}).get('status') != 'passed':
+        return
+    snapshot = None
+    assessment = None
+    try:
+        snapshot = ProtectedSnapshot.capture(env, tool_relpath=tool_relpath)
+        prerequisites = _gate_prerequisites(snapshot, base_source=base_source,
+                                            decision=result.decision, context=verification)
+        assessment = SemanticVerifier().assess(snapshot, spec=verification.spec,
+            runtime=verification.runtime, prerequisites=prerequisites)
+        result.decision['deployment_verification'] = assessment.summary
+        result._semantic_audit = assessment.audit
+        if assessment.authorization is not None:
+            result._authorization = assessment.authorization
+            result.deploy = True
+            result.reason = assessment.reason
+            if result.decision['decision_signal'] == 'deterministic_test':
+                result.decision['decision'] = 'deploy'
+    except ValueError as exc:
+        reason = str(exc).split(':', 1)[0]
+        allowed = {'verification_prerequisites_unavailable', 'verification_context_stale', 'verification_containment_unavailable',
+                   'verification_cleanup_unconfirmed', 'verification_runtime_untrusted'}
+        result.decision['deployment_verification'] = {'schema_version': '1', 'status': 'unverifiable',
+            'reason': reason if reason in allowed else 'verification_evidence_invalid'}
+    finally:
+        if snapshot is not None and (assessment is None or assessment.authorization is None):
+            snapshot.close()
+    result.reason = result.decision['deployment_verification']['reason']
+    result.decision['reason'] = result.reason

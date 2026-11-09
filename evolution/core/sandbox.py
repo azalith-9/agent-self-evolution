@@ -118,10 +118,12 @@ for action in (lambda: Path(canary).read_text(),lambda: Path(canary).write_text(
     try: action(); checks.append(False)
     except OSError: checks.append(True)
 for family,address in ((socket.AF_INET,('127.0.0.1',int(port))),(socket.AF_UNIX,unix_path)):
-    with socket.socket(family) as client:
-        client.settimeout(.1)
-        try: client.connect(address); checks.append(False)
-        except OSError: checks.append(True)
+    try:
+        with socket.socket(family) as client:
+            client.settimeout(.1)
+            client.connect(address)
+        checks.append(False)
+    except OSError: checks.append(True)
 Path(work,'allowed').write_text('allowed')
 print(json.dumps(checks))
 '''

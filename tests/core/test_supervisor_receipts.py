@@ -19,7 +19,7 @@ def receipt() -> dict:
         schema_version="1", invocation_id="receipt-request", policy_id="unregistered-policy",
         runtime_id="unregistered-runtime", snapshot_id="unregistered-snapshot",
         scope_id="unregistered-scope", launched=True, exit_code=0, timed_out=False,
-        cancelled=False, duration_seconds=0.01, capture_complete=True,
+        cancelled=False, duration_seconds=0.01, capture_complete=True, stdin_complete=True,
         containment=dict(backend="unconfined", read_isolated=False, write_confined=False,
                          network_isolated=False, descendant_cleanup_certified=True),
         cleanup_complete=True, error=None,

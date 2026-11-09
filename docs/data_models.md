@@ -1,3 +1,10 @@
+---
+title: Data models
+description: Persisted artifacts, schema versions, and diagnostic accounting
+doc_type: reference
+maintenance: Update with related contracts and module boundaries
+---
+
 # Data Models
 
 The dataclasses, schemas, and on-disk formats the framework uses.
@@ -747,10 +754,23 @@ The code-repair (Tier 4) and triage-sentinel (Tier 5) paths write their own on-d
 
 Written by `evolution/code/evolve_code.py`. Unlike the GEPA variants (bootstrap CI, knee-point, synthetic dataset) this gate is **deterministic-test / oracle** based — no judge, no bootstrap.
 
-**[PLANNED - Implementation Pending]** The comparison/verification separation and
-evidence schemas below specify intended behavior. They do not certify source
-behavior. The [deployment evidence reference](reference/deployment-evidence.md)
-is the canonical field/type, lifecycle, and replay contract.
+**Protected verification: [PLANNED — Implementation Pending].** The schemas
+below specify intended authority-bearing behavior. Protected setup and
+retained-byte prerequisite replay still refuse; host provisioning cannot close
+these implementation gaps. See [verification blockers](protected_verification.md).
+
+The [deployment evidence reference](reference/deployment-evidence.md) defines
+cooperative diagnostics and generic supervisor receipts. [Protected verification](protected_verification.md)
+defines the single-file specification (version `"2"`, including required
+`scratch_inodes`), runtime registry (version `"1"`), prerequisite observations,
+protected execution evidence, detailed semantic audit, native evidence and export
+receipt (version `"2"`). Schema labels and audit digests alone do not establish
+trusted authority. See the [evidence boundary](protected_verification.md#evidence-boundary).
+These schemas have distinct
+meanings; historical version `"1"` artifacts do not satisfy version `"2"` contracts.
+The compact summary and code gate remain version `"1"`.
+Live authority and owned snapshot leases are excluded from JSON; see
+[ownership](protected_verification.md#gate-to-export-ownership).
 
 ```json
 {
@@ -795,8 +815,9 @@ it describes the full comparison, including scope, surface, and configured floor
 Neither it nor `guards` authorizes export. Both code
 gates consume the shared internal verifier, whose persisted
 `deployment_verification` uses schema `"1"` and statuses `accepted`, `rejected`,
-and `unverifiable`. Only accepted verification with still-valid snapshot integrity
-can permit `decision="deploy"`. A historical artifact without this block supplies
+and `unverifiable`. An accepted assessment can coexist with `deploy=false` when no export root
+is bound. Live deployment readiness additionally requires current issued
+authority; persisted `decision` never restores it. A historical artifact without this block supplies
 no such proof. The held-out gate retains deployment decisions `deploy`/`reject`.
 The oracle gate retains diagnostic decisions `correct`/`incorrect`, mapped to
 comparison `passed`/`failed`, with `inconclusive` for unavailable diagnostic results.
@@ -864,7 +885,9 @@ Per-round repair record for human review (`evolution/code/trace.py`). No per-hun
     {"round": 1, "proposed": true, "freeze_violations": [], "test_passed": true, "output_tail": "PASSED"}
   ],
   "final_diff": "--- live_baseline\n+++ deployed\n@@ ... @@\n-    return 0\n+    return a + b",
-  "containment": {"sandboxed": true, "mechanism": "sandbox-exec", "platform": "darwin"}
+  "containment": {"backend": "bubblewrap", "required": true, "platform": "linux",
+                  "read_isolated": true, "write_confined": true,
+                  "network_isolated": true, "descendant_cleanup_certified": true}
 }
 ```
 
@@ -874,23 +897,52 @@ Deployment requires [capability and completion evidence](reference/execution-con
 for the current invocation. `null` means unknown posture and differs from `false`;
 neither authorizes deployment. Scope checks, surface checks, execution evidence,
 and exported payload bind to the same protected bytes and modes. Benchmarks and
-later subprocesses require a final integrity recheck; drift invalidates prior
-acceptance. Historical write-only sandbox records remain
+later subprocesses require prior authority revocation and fresh assessment;
+a final hash alone cannot bind earlier writable execution. Historical write-only sandbox records remain
 readable without being promoted to evidence of stronger isolation.
 
 ### `campaign_ledger.jsonl` + `campaign_report.json`
 
-The campaign ledger is append-only/resumable; one line per organism (or skip reason).
-**[PLANNED - Implementation Pending]** Campaign seeds consume diagnostic
+**Recovery integration: [PLANNED — Implementation Pending].** This contract
+requires journal version `"3"`, canonical decimal-string monetary fields and
+explicit durable dispatch/reconciliation records. Existing version `"2"` history
+retains its original numeric interpretation; it is not silently migrated.
+Version-3-derived reports declare `journal_schema_version="3"`; historical
+reports and numeric monetary examples below are not relabeled.
+Complete production billing coverage, SWE-bench residual-ledger integration and
+actual immutable identity checks remain unresolved. See
+[recovery blockers](campaign_recovery.md) and
+[monetary compatibility](campaign_recovery.md#monetary-encoding-and-version-compatibility).
+Historical ledger/report examples below retain their original formats.
+
+Under the intended contract, authoritative `campaign_progress.jsonl` records starts before
+execution and commits completed seeds before organism or stage aggregation.
+Each observed cost is persisted once under stable dispatch ownership;
+coverage reconciliation retains unknown amounts and residual liability. Hermes
+and SWE-bench restore durable measured/estimated totals before further spending.
+Read-only monitor reconstruction validates the complete ordered caller identity
+before annotations. The versioned, hash-chained records, exclusive
+writer lock, fsync barriers, identity bindings and torn-tail policy are defined
+in [campaign recovery](campaign_recovery.md), including durable
+[budget session audits](campaign_recovery.md#budget-ceilings-and-session-audits)
+for total ceiling increases. `campaign_ledger.jsonl` is a
+regenerable compatibility output with one row per complete organism or skip.
+Legacy rows remain historical diagnostics with no automatic migration or
+speculative identity import. Campaign seeds consume diagnostic
 comparison outcomes, separately from deployment eligibility. In a fully measured
 row, `seeds` is a nonempty list of Booleans: true for `passed`, false for an
 established `failed` comparison. It must not be computed from `gate.deploy`.
-`deploy_reachable` preserves the historical rule: at least one correct seed and
+`deploy_reachable` is computed only for fully measured organisms and preserves the historical rule: at least one correct seed and
 `2 * n_correct >= len(seeds)` (two of three by default; an even-seed tie qualifies).
 It describes diagnostic repair reachability and grants no deployment authority.
 Unavailable independent verification alone preserves successful seeds and the
 organism's place in the diagnostic denominator. Each export still requires
-independent verification of its exact snapshot.
+independent verification of its exact snapshot. Derived reports expose requested,
+measured, outstanding and inconclusive counts and the runner durability level
+(`seed` or `organism`), known/estimated costs and unknown possible spend.
+Configured limits participate in campaign identity and list unexecuted organisms
+without truncating the requested population. Neither a journal record nor a
+report restores live authority.
 
 ```jsonl
 {"status": "organism", "tool": "tools/approval.py", "fix_sha": "7f1b2b45…", "seeds": [true, false, false], "deploy_reachable": false}

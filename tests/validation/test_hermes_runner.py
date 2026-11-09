@@ -821,7 +821,8 @@ class TestHermesAgentRunnerSubprocess:
                 fixture_dir=fixture_dir,
             ))
 
-        assert captured["args"][:2] == ["hermes", "-z"]
+        assert Path(captured["args"][0]).name == "hermes"
+        assert captured["args"][1:2] == ["-z"]
         assert captured["args"][2] == "please patch a file"
         assert captured["cwd"] == str(fixture_dir)
         # Sandbox env vars: HERMES_HOME and HOME point at the SAME tmp dir.
@@ -967,7 +968,8 @@ class TestHermesAgentRunnerSubprocess:
 
         # -m must appear before -z so hermes parses it as a global flag,
         # not as part of the -z message.
-        assert captured["args"][:4] == ["hermes", "-m", "gpt-4o-mini", "-z"]
+        assert Path(captured["args"][0]).name == "hermes"
+        assert captured["args"][1:4] == ["-m", "gpt-4o-mini", "-z"]
         assert captured["args"][4] == "debug"
 
     def test_model_none_omits_minus_m_flag(self, fixture_dir, tmp_path):
@@ -993,7 +995,8 @@ class TestHermesAgentRunnerSubprocess:
             ))
 
         assert "-m" not in captured["args"]
-        assert captured["args"] == ["hermes", "-z", "hello"]
+        assert Path(captured["args"][0]).name == "hermes"
+        assert captured["args"][1:] == ["-z", "hello"]
 
     def test_litellm_prefix_stripped_before_minus_m(self, fixture_dir, tmp_path):
         """Regression: hermes -m treats '<provider>/<model>' as openrouter-style
@@ -1025,7 +1028,8 @@ class TestHermesAgentRunnerSubprocess:
                 fixture_dir=fixture_dir,
             ))
 
-        assert captured["args"][:4] == ["hermes", "-m", "gpt-4o-mini", "-z"]
+        assert Path(captured["args"][0]).name == "hermes"
+        assert captured["args"][1:4] == ["-m", "gpt-4o-mini", "-z"]
         assert "openai/" not in captured["args"][2]
 
     def test_skills_src_none_means_no_skills_dir_created(self, fixture_dir, tmp_path):

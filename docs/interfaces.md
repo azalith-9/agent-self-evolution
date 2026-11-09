@@ -1,3 +1,10 @@
+---
+title: Interfaces
+description: Public Python APIs, CLI options, configuration, and refusal contracts
+doc_type: reference
+maintenance: Update with related contracts and module boundaries
+---
+
 # Interfaces
 
 The public APIs, CLIs, and data contracts the codebase exposes — both to users and to the integration points it depends on.
@@ -9,6 +16,122 @@ there is no separate public executor CLI. Code-repair deployment uses the
 [internal verification contract](reference/deployment-evidence.md); no CLI flag
 turns cooperative diagnostics or `--allow-unconfined` into independent proof.
 Missing proof retains diagnostics and refuses deployment.
+
+## Protected code verification options
+
+**[PLANNED — Implementation Pending]** The accepting/export behavior in this
+section is an intended contract. Protected setup and retained-byte prerequisite
+replay currently refuse; host provisioning alone cannot resolve the missing
+implementation. See [verification blockers](protected_verification.md).
+Existing option parsing does not establish an available accepting path.
+
+The options for `python -m evolution.code.evolve_code` extend its
+visible-test, held-out-test, surface and regression checks. The
+[semantic reference](protected_verification.md) defines the complete configuration
+and [Python interfaces](protected_verification.md#python-integration).
+Verification requires independently protected setup and runtime evidence for
+each invocation. See the [evidence boundary](protected_verification.md#evidence-boundary);
+configuration alone does not establish native validation.
+
+| Option | Default | Contract |
+|---|---|---|
+| `--semantic-spec` | Unset | Protected strict JSON semantic specification; absent means diagnostic-only, with export refused |
+| `--verification-runtime-config` | Unset | Explicit absolute protected runtime registry; required with a semantic specification |
+| `--runtime-id` | Unset | Trusted registry entry; must equal the specification runtime ID |
+| `--export-to` | Unset | Approved existing local destination root; installs the authorized relative target from retained snapshot bytes and mode |
+| `--require-sandbox/--allow-unconfined` | Required | Unconfined operation is diagnostic only and cannot authorize export |
+| `--no-create-pr` | Enabled | Local export needs no publication; `--export-to` never implies PR creation |
+
+The three semantic options are all-or-none. `--export-to` requires all three
+and is passed as `export_root` during context preparation. An accepted
+assessment without a bound export root issues no authority. Supplying only part
+of the semantic configuration is a configuration error.
+With no semantic configuration, existing diagnostics remain available and
+`deployment_verification` is unverifiable. Requesting export without accepted
+live authority fails. A configured semantic mismatch rejects; unavailable
+containment or incomplete execution refuses authorization. Applicable checks and
+configured benchmarks execute against retained read-only bytes before sealing
+and final semantic verification. The parent establishes the complete required
+population and validates all observations before consuming acceptance or rejection.
+Any later candidate dispatch first revokes authority and requires fresh assessment.
+
+Both code gates accept keyword-only `verification=None`, a framework-prepared
+semantic verification context, without changing existing positional arguments.
+Prepare the context with `VerificationContext.prepare` as defined in the
+[Python integration reference](protected_verification.md#python-integration).
+The gate creates the assessment only at its final boundary. Caller-constructed
+results and compact persisted summaries cannot populate that context. The gate
+transfers live authority and the snapshot lease through the readonly
+`CodeGateResult.export_authorization` property. The CLI holds the result open
+through export and calls `close()` in `finally`, including when export is omitted
+or fails; see [ownership and disposal](protected_verification.md#gate-to-export-ownership).
+Export consumes a live handle once, even on failure; `RepairResult.final_source` remains
+diagnostic data. The read-only `CodeGateResult.export_receipt` retains the identified claim
+receipt after failure, cancellation and close. The CLI writes
+`semantic_verification.json` and, for every
+claimed export including a failed export, `export_receipt.json` separately from
+the compact gate summary.
+Every `--create-pr` publication request fails before preparation, candidate
+execution or spend, including requests without semantic configuration.
+Local export does not publish a change.
+
+The credential-free `python -m evolution.code.native_evidence` CLI requires
+`--verification-runtime-config`, `--runtime-id` and `--output-dir`. It writes
+version `"2"` `native_evidence.json`; `--demo` exercises known-good acceptance,
+wrong-response rejection, exact-byte/mode export and replay rejection through
+production APIs. Exit `0` requires all required controls and requested
+demonstrations enforced; exit `1` records observed failures; exit `2` records
+required capability/refusal gaps without an observed failure. An unlaunched child
+has a null exit. Collector completion is recorded separately from child outcomes.
+See the [credential-free tutorial](tutorials/verify-json-command.md) and
+[native evidence contract](protected_verification.md#native-evidence).
+
+## Campaign recovery options [PLANNED — Implementation Pending]
+
+This section specifies intended production integration. Durable callback
+attribution and scoped journal recovery exist, but complete billing coverage,
+SWE-bench residual-ledger restoration and actual immutable execution identity
+verification remain unresolved. The planned journal format is version `"3"`,
+with canonical decimal-string money and durable dispatch/reconciliation records;
+the existing version `"2"` writer is not a version `"3"` implementation. See
+[recovery blockers and compatibility](campaign_recovery.md).
+
+Campaign functions, campaign CLI and monitor attempts require containment by
+default. Journal-based campaign resume uses the same `--output-dir` and compatible
+immutable inputs. See the [recovery boundary](campaign_recovery.md#recovery-boundary)
+and [adapter API](campaign_recovery.md#adapter-interfaces). Legacy records remain
+historical with no automatic migration or speculative import.
+The monitor accepts optional `--progress-root` and
+`attempt_candidates(..., progress_root=None)`: configured progress binds the full
+ordered selected queue; `None` has no durable recovery promise. Explicit
+`progress_runner` and legacy `organism_runner` interfaces are mutually exclusive;
+internal `TypeError` is never swallowed to select a protocol.
+
+`--max-cost-usd` controls cumulative campaign spend across sessions. Omission on
+resume inherits the last ceiling. Only a finite ceiling can increase, through a
+durable `session_started`; an initially null ceiling stays null. Every writer
+establishes its current-process session before dispatch. The intended integration requires both Hermes and SWE-bench,
+including production progress runners, to restore durable measured/estimated spend
+before arming the residual dispatch ledger. Unknown amounts or coverage block
+finite-budget dispatch even after a ceiling increase. In-flight overshoot means
+this is a scheduling guard, not a provider-side billing cap. See
+[budget session audits](campaign_recovery.md#budget-ceilings-and-session-audits)
+and [coverage reconciliation](campaign_recovery.md#dispatch-coverage-and-reconciliation).
+
+Production `resolved_production_identity` (Hermes CLI:
+`--production-identity-file`) declares expected provider/model/revision and
+runtime/harness/dataset/image identities. Shape validation cannot establish what
+executes. The planned adapter contract requires independent verification of actual resolved
+material and its use for dispatch and resume; unresolved required identity refuses. See
+[resolved identity checks](campaign_recovery.md#resolved-identity-checks).
+
+`CampaignJournal.inspect(root)` returns detached validated records through pinned
+read-only storage without writer initialization, session append or repair. Monitor
+reconstruction validates the complete ordered candidate and queue-row identity,
+including uniqueness, before changing annotations. Secondary inspection errors
+preserve the original exception or cancellation. Attempted work remains
+inconclusive rather than becoming an eligibility skip. See
+[adapter interfaces](campaign_recovery.md#adapter-interfaces).
 
 ## CLI: `python -m evolution.skills.evolve_skill`
 
@@ -287,13 +410,13 @@ Repairs one broken tool from a failing test in a throwaway worktree, behind the 
 
 ### Optional flags
 
-- `--base-ref <ref>` — git ref to repair from (default: `origin/<pr-base-branch>` with `--create-pr`, else `HEAD`).
+- `--base-ref <ref>` — git ref to repair from (default: `HEAD`). Resolve it to a full commit before binding verification and resume identities.
 - `--repair-rounds <n>` — max propose→test→feedback rounds (default 5).
 - `--proposer-model <model>` — override the proposer LM (else resolved from Hermes config).
 - `--floor-path <path>` (repeatable) — regression-floor test path(s) (default `tests/tools`).
 - `--min-retain-ratio <f>` — reject a rewrite shrinking below this fraction (default 0.8).
-- `--benchmark-cmd <cmd>` — full-suite floor run once at deploy (receives `WORKTREE_PATH`, `EVOLVED_PATH`, `RUN_DIR`, `TARGET_NAME`, `ARTIFACT_TYPE`).
-- `--create-pr` / `--pr-base-branch` / `--pr-draft` — open an opt-in **draft** human-review PR on deploy (never auto-merges).
+- `--benchmark-cmd <cmd>` — optional gate prerequisite run against retained read-only candidate bytes before sealing (receives `WORKTREE_PATH`, `EVOLVED_PATH`, `RUN_DIR`, `TARGET_NAME`, `ARTIFACT_TYPE`).
+- `--create-pr` / `--pr-base-branch` / `--pr-draft` — compatibility publication options; no supported protected publication flow. The CLI refuses `--create-pr` before preparation, candidate execution or spend, even without semantic configuration. Use `--no-create-pr` for local operation; base/draft options do not authorize publication. See the [verification options](#protected-code-verification-options).
 - `--require-sandbox` / `--allow-unconfined` — require enforceable capabilities for authoritative repair execution (default: require). Explicit unconfined runs are diagnostic and cannot authorize deployment. Campaign and gaming-audit execution follow the same policy; monitor attempts cannot bypass it.
 - `--output-dir <path>` — default `output/code/<tool-stem>/<timestamp>`.
 

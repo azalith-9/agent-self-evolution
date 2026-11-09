@@ -32,7 +32,7 @@ class TestStratify:
 class TestCampaignOrchestration:
     def test_ledger_written_and_report_built(self, tmp_path):
         cands = _cands(4)
-        # 3 deploy-reachable, 1 not-valid (None).
+        # An attempted inconclusive organism stops dependent dispatch.
         canned = {
             "sha000": OrganismResult("tools/t.py", "sha000", [True, True, True]),
             "sha001": OrganismResult("tools/t.py", "sha001", [True, True, False]),
@@ -42,11 +42,14 @@ class TestCampaignOrchestration:
         rep = run_campaign(
             Path("/unused"), output_dir=tmp_path, max_organisms=10, stages=(),
             candidates=cands, organism_runner=lambda c: canned[c.fix_sha])
-        assert rep["n_organisms"] == 3
-        assert rep["deploy_reachable"]["k"] == 3
+        assert rep["n_organisms"] == 2
+        assert rep["deploy_reachable"]["k"] == 2
         rows = [json.loads(l) for l in (tmp_path / "campaign_ledger.jsonl").read_text().splitlines()]
-        assert any(r.get("status") == "not_valid" and r["fix_sha"] == "sha002" for r in rows)
-        assert sum(1 for r in rows if r.get("status") == "organism") == 3
+        assert all(r["fix_sha"] not in {"sha002", "sha003"} for r in rows)
+        progress = [json.loads(l) for l in (tmp_path / "campaign_progress.jsonl").read_text().splitlines()]
+        assert progress[-1]["kind"] == "organism_inconclusive"
+        assert progress[-1]["payload"]["reason"] == "not_valid"
+        assert sum(1 for r in rows if r.get("status") == "organism") == 2
 
     def test_skip_reasons_recorded(self, tmp_path):
         cands = _cands(3)
@@ -60,8 +63,11 @@ class TestCampaignOrchestration:
         assert rep["n_organisms"] == 1
         rows = [json.loads(l) for l in (tmp_path / "campaign_ledger.jsonl").read_text().splitlines()]
         statuses = {r["fix_sha"]: r["status"] for r in rows}
-        assert statuses["sha001"] == "too_large"
-        assert statuses["sha002"] == "not_valid"
+        assert statuses == {"sha000": "organism"}
+        progress = [json.loads(l) for l in (tmp_path / "campaign_progress.jsonl").read_text().splitlines()]
+        assert progress[-1]["kind"] == "organism_inconclusive"
+        assert progress[-1]["payload"]["reason"] == "too_large"
+        assert not any(r["kind"] == "organism_skipped" for r in progress)
 
     def test_resume_skips_done(self, tmp_path):
         cands = _cands(4)
@@ -74,13 +80,12 @@ class TestCampaignOrchestration:
             return canned[c.fix_sha]
 
         run_campaign(Path("/u"), output_dir=tmp_path, max_organisms=10, stages=(),
-                     candidates=cands[:2], organism_runner=runner)
+                     candidates=cands, organism_runner=runner)
         first = list(seen)
         run_campaign(Path("/u"), output_dir=tmp_path, max_organisms=10, stages=(),
                      candidates=cands, organism_runner=runner)
-        # second run only processes the 2 new candidates, not the 2 already done.
-        assert first == ["sha000", "sha001"]
-        assert seen[2:] == ["sha002", "sha003"]
+        assert first == ["sha000", "sha001", "sha002", "sha003"]
+        assert seen == first
 
     def test_futility_stop_at_stage(self, tmp_path):
         cands = _cands(20)

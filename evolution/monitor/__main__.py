@@ -41,9 +41,11 @@ console = Console()
 @click.option("--base-python", default=None)
 @click.option("--require-sandbox/--allow-unconfined", default=True,
               help="Require capability-tested containment for repair attempts.")
+@click.option("--progress-root", default=None, type=click.Path(file_okay=False, path_type=Path),
+              help="Optional durable campaign progress for the selected ordered queue.")
 @click.option("--output-dir", default=None, type=click.Path(file_okay=False, path_type=Path))
 def main(repo_root, since_days, max_per_tool, top, attempt_top, max_cost_usd,
-         proposer_model, base_python, output_dir, require_sandbox):
+         proposer_model, base_python, output_dir, require_sandbox, progress_root):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s",
                         datefmt="%H:%M:%S")
     if output_dir is None:
@@ -70,7 +72,8 @@ def main(repo_root, since_days, max_per_tool, top, attempt_top, max_cost_usd,
             attempt_candidates(repo_root, candidates[:attempt_top], payload,
                                max_cost_usd=max_cost_usd, proposer_model=proposer_model,
                                base_python=base_python, console=console, require_sandbox=require_sandbox,
-                               persist=lambda current: write_queue(output_dir, current))
+                               persist=lambda current: write_queue(output_dir, current),
+                               progress_root=progress_root)
         finally:
             write_queue(output_dir, payload)
             (output_dir / "triage_report.md").write_text(render_report(payload, top=top))

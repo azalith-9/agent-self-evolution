@@ -238,6 +238,9 @@ class WorktreeEnv:
         self._base_python = sys.executable
         self._dep_sites: list[str] = []
         self._git_pointer: bytes | None = None
+        self._execution_generation = 0
+        self._execution_active = False
+        self._execution_clean = True
 
     # -- construction ------------------------------------------------------
 
@@ -390,6 +393,9 @@ class WorktreeEnv:
         silently — the flag would then promise a guarantee that path does not
         provide.
         """
+        from evolution.code.semantic_verifier import revoke_environment
+        revoke_environment(self)
+        self._execution_generation += 1
         read_roots = [*runtime_read_roots(), self._root.resolve(), Path(sys.base_prefix).resolve(),
                       Path(self._base_python).resolve().parent.parent,
                       Path(__file__).resolve().parent,
@@ -406,10 +412,9 @@ class WorktreeEnv:
         """How confined this run's test execution actually is.
 
         Recorded in run evidence so an unconfined run is visible rather than
-        assumed. Note what the confined case does and does not mean: writes
-        outside the run root and the temp roots are denied; reads, process-exec
-        and network are not. It prevents corrupting the checkout or home dir --
-        it is not isolation.
+        assumed. Confined execution permits named runtime/run-root reads and
+        run-root writes, denies networking, and uses the native backend.
+        Cooperative pytest diagnostics do not authorize code export.
         """
         return {
             "sandboxed": self.sandboxed,
@@ -569,8 +574,11 @@ class WorktreeEnv:
         ]
         argv, sandboxed = self.confine(args)
         start = time.monotonic()
+        self._execution_active = True
+        self._execution_clean = False
         try:
             res = _run(argv, cwd=self.worktree, timeout=timeout, env=child_env)
+            self._execution_clean = bool(getattr(res, 'cleanup_complete', False))
             duration = time.monotonic() - start
             if sandboxed and res.returncode > 5:
                 # sandbox-exec exits 65 without running the child when a profile
@@ -618,6 +626,8 @@ class WorktreeEnv:
                 duration_seconds=float(timeout),
                 exit_code=None,
             )
+        finally:
+            self._execution_active = False
 
     def _diagnostic_inputs_id(self, test_paths: tuple[str, ...], extra_args: list[str] | None) -> str:
         """Fingerprint diagnostic selection and test bytes; this is not protection."""

@@ -35,11 +35,14 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
+import math
+import os
 import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any, Callable, Iterator, Optional
 from uuid import uuid4
 
@@ -57,6 +60,84 @@ _HEARTBEAT_TIERS: tuple[tuple[int, int], ...] = (
     (300, logging.WARNING),
     (600, logging.WARNING),
 )
+
+
+_OBSERVATION_LOCK = threading.RLock()
+_OBSERVATION_SINK: CostObservationCapture | None = None
+_COST_SCOPE: ContextVar[str | None] = ContextVar("durable_cost_scope", default=None)
+
+
+class CostObservationCapture:
+    """Collect explicit callback deliveries without assuming complete billing coverage.
+
+    LiteLLM may deliver callbacks on background threads. A process may have only
+    one active capture; deliveries after close cannot prove that attempt's cost.
+    """
+    def __init__(self) -> None:
+        self.scope_id = uuid4().hex
+        self.rows: dict[str, dict] = {}
+        self.error: ValueError | None = None
+
+    def record(self, *, call_id: object, model: str, amount: Decimal | None, source: str) -> None:
+        with _OBSERVATION_LOCK:
+            if type(call_id) is not str or not call_id:
+                self.error = ValueError('cost observation lacks an explicit call identity')
+                return
+            key = hashlib.sha256((call_id + ':' + source).encode()).hexdigest()
+            row = {'observation_id': key, 'amount_usd': amount, 'source': source,
+                   'model': str(model), 'call_id': call_id}
+            if key in self.rows and self.rows[key] != row:
+                self.error = ValueError('conflicting cost observation delivery')
+                return
+            self.rows[key] = row
+
+
+@contextmanager
+def capture_cost_observations() -> Iterator[CostObservationCapture]:
+    """Capture observed prices; missing/late callbacks retain unknown coverage."""
+    global _OBSERVATION_SINK
+    capture = CostObservationCapture()
+    with _OBSERVATION_LOCK:
+        if _OBSERVATION_SINK is not None:
+            raise ValueError('cost observation capture already active')
+        _OBSERVATION_SINK = capture
+    token = _COST_SCOPE.set(capture.scope_id)
+    try:
+        yield capture
+    finally:
+        with _OBSERVATION_LOCK:
+            _OBSERVATION_SINK = None
+        _COST_SCOPE.reset(token)
+
+
+def _observe_callback_cost(kwargs: dict, response: object, *, amount: Decimal | None,
+                           source: str) -> None:
+    with _OBSERVATION_LOCK:
+        metadata = kwargs.get('litellm_params', {}).get('metadata') or kwargs.get('metadata') or {}
+        scope_id = metadata.get('ase_cost_scope', _COST_SCOPE.get())
+        if _OBSERVATION_SINK is not None and scope_id == _OBSERVATION_SINK.scope_id:
+            _OBSERVATION_SINK.record(call_id=kwargs.get('litellm_call_id'),
+                model=kwargs.get('model', getattr(response, 'model', '<unknown>')),
+                amount=amount, source=source)
+
+
+def _bind_cost_scope(kwargs: dict) -> dict:
+    scope = _COST_SCOPE.get()
+    if scope is None:
+        return kwargs
+    metadata = dict(kwargs.get('metadata') or {}, ase_cost_scope=scope)
+    return dict(kwargs, metadata=metadata)
+
+
+def _clear_cost_capture_after_fork() -> None:
+    global _OBSERVATION_LOCK, _OBSERVATION_SINK
+    _OBSERVATION_LOCK = threading.RLock()
+    _OBSERVATION_SINK = None
+    _COST_SCOPE.set(None)
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(after_in_child=_clear_cost_capture_after_fork)
 
 
 @dataclass(frozen=True)
@@ -208,6 +289,7 @@ def _log_litellm_failure(kwargs, exception, start_time, end_time) -> None:
     HermesProviderError. Defense-in-depth for credentials that go bad
     after preflight passed.
     """
+    _observe_callback_cost(kwargs, exception, amount=None, source="litellm-failure-unknown-v1")
     if not isinstance(exception, BaseException):
         exception = kwargs.get("exception", exception)
     model = kwargs.get("model", "<unknown>")
@@ -494,12 +576,17 @@ def _log_litellm_cost(
     )
     try:
         cost = float(litellm.completion_cost(completion_response=completion_response))
+        if not math.isfinite(cost) or cost < 0:
+            raise ValueError("invalid observed cost")
+        observed = Decimal(str(cost))
     except Exception as exc:  # noqa: BLE001 — litellm raises a wide range
         logger.debug(
-            "litellm.completion_cost failed for model=%s: %s — recording 0.0",
+            "litellm.completion_cost failed for model=%s: %s — cost remains unknown",
             model, exc,
         )
         cost = 0.0
+        observed = None
+    _observe_callback_cost(kwargs, completion_response, amount=observed, source="litellm-completion-cost-v1")
     target_ledger.record(
         model=model,
         prompt_tokens=prompt_t,
@@ -563,7 +650,7 @@ def _install_cost_ceiling_lm_guard() -> None:
         @functools.wraps(original_call)
         def call_with_cost_ceiling_check(self: Any, *args: Any, **kwargs: Any) -> Any:
             _raise_if_lm_aborted()
-            return original_call(self, *args, **kwargs)
+            return original_call(self, *args, **_bind_cost_scope(kwargs))
 
         call_with_cost_ceiling_check._cost_ceiling_guarded = True  # type: ignore[attr-defined]
         BaseLM.__call__ = call_with_cost_ceiling_check
@@ -574,7 +661,7 @@ def _install_cost_ceiling_lm_guard() -> None:
         @functools.wraps(original_acall)
         async def acall_with_cost_ceiling_check(self: Any, *args: Any, **kwargs: Any) -> Any:
             _raise_if_lm_aborted()
-            return await original_acall(self, *args, **kwargs)
+            return await original_acall(self, *args, **_bind_cost_scope(kwargs))
 
         acall_with_cost_ceiling_check._cost_ceiling_guarded = True  # type: ignore[attr-defined]
         BaseLM.acall = acall_with_cost_ceiling_check

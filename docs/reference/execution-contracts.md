@@ -10,9 +10,23 @@ maintenance: Update with adapter, evidence, or authentication changes
 This reference defines the safety and completion contracts shared by repair,
 validation, campaign, orchestration, and monitor execution. Existing tier APIs
 remain the entry points; the execution records are internal adapter contracts.
-The [planned deployment evidence specification](deployment-evidence.md) is
-canonical for diagnostic/receipt field types, lifecycle, and replay consumption;
-these contracts do not certify implementation behavior.
+The [deployment evidence reference](deployment-evidence.md) is canonical for
+diagnostic/receipt field types, lifecycle and replay consumption. The
+[semantic path](../protected_verification.md) specifies strict JSON-command
+verification, trusted runtime configuration and single-use snapshot export.
+Native guarantees require actual capability and lifecycle evidence in addition
+to implementation conformance. The [evidence boundary](../protected_verification.md#evidence-boundary)
+separates supported behavior, refusal, mock checks and native proof; the
+[recovery boundary](../campaign_recovery.md#recovery-boundary) separates journal
+reuse from live authority.
+
+The protected semantic/export and production recovery requirements in this
+reference are **[PLANNED — Implementation Pending]**. Protected setup and
+retained-byte prerequisite replay still refuse. Complete billing coverage,
+SWE-bench residual budgets and actual immutable identity verification remain
+unresolved. Host provisioning alone cannot resolve these implementation gaps.
+See the linked verification/recovery blockers before treating a requirement as
+available behavior.
 
 ## Contents
 
@@ -41,7 +55,11 @@ these contracts do not certify implementation behavior.
 | `evolution/core/git_scope.py` | Checked Git commands and complete changed-path inspection |
 | `evolution/code/pytest_evidence_plugin.py` | Cooperative pytest lifecycle diagnostics |
 | `evolution/code/test_evidence.py` | Strict diagnostic validation and invocation matching |
-| `evolution/code/deployment_evidence.py` | Shared internal deployment verifier and schema 1 verdicts |
+| `evolution/code/deployment_evidence.py` | Refusal-only compatibility helper and schema 1 summaries |
+| `evolution/code/semantic_verifier.py` | Owned prepared context and authority-free semantic assessment |
+| `evolution/core/protected_execution.py`, `verification_worker.py` | Dedicated single-process policy, bounded transport and trusted execution facts |
+| `evolution/code/campaign_state.py` | Exclusive durable attempt/result journal and replay |
+| `evolution/composition/monitor_code.py` | Lazy harvesting and attempt wiring between monitor and code |
 | `evolution/code/worktree.py` | Disposable repair environment, protected snapshots, and existing `WorktreeEnv` adapter |
 | `evolution/code/gate.py` | Shared verification plus surface, oracle, holdout, regression-floor, and scope decisions |
 | `evolution/code/repair.py`, `evolve_code.py` | Diagnostic repair loop and export of accepted snapshot bytes and modes |
@@ -243,12 +261,16 @@ SWE-bench retains its grading adapter; container text is not pytest evidence.
 
 ## Gate acceptance
 
-Both `run_code_gate` and `run_code_oracle_gate` call the same internal deployment
-verifier. It checks protected evidence associations rather than trusting supplied
-Booleans. Verification returns `accepted`, `rejected`, or `unverifiable`.
+Both `run_code_gate` and `run_code_oracle_gate` use
+`gate.finalize_verification` as the accepting boundary. The compatibility
+`verify_deployment` helper remains refusal-only, including its inert
+`verification` keyword. Finalization checks protected evidence associations
+rather than trusting supplied Booleans. Verification returns `accepted`, `rejected`, or `unverifiable`.
 Missing independent semantic proof yields
 `independent_test_verification_unavailable`, with deployment refused and
-available diagnostic results retained. No CLI switch enables independent proof.
+available diagnostic results retained. Explicit semantic/runtime configuration
+selects the JSON-command verifier; no CLI switch turns cooperative
+diagnostics into independent proof.
 
 | Evaluation | Acceptance prerequisite in addition to independent verification |
 |---|---|
@@ -259,11 +281,16 @@ available diagnostic results retained. No CLI switch enables independent proof.
 | Benchmark command | Confined execution, bounded cleanup, valid completion, scope, and final snapshot recheck |
 | Prompt deployment | Nonempty baseline and evolved reports without abstentions, including compiled-floor validation |
 
-Scope checks, public-surface checks, evidence, and exported bytes and modes all
-refer to one protected snapshot. Relevant subsequent mutation invalidates the
-acceptance; later benchmarks cannot leave stale evidence eligible for export.
+Scope, surface, diagnostics, regression/oracle, configured benchmarks, semantic
+evidence and export all bind retained bytes, canonical target and ordinary mode.
+Prerequisites run read-only before sealing. Every later candidate dispatch
+revokes authority before execution, even if launch subsequently fails.
 Export consumes stored accepted bytes, verifies the destination, and prevents
 concurrent mutation throughout final verification and export.
+The live gate result owns the snapshot lease and supplies the CLI's
+opaque export handle separately from persisted decisions. The CLI must close
+the result even if export is omitted or fails; see
+[ownership and disposal](../protected_verification.md#gate-to-export-ownership).
 
 Thresholds, tolerances, green cooperative reports, and successful surface checks
 cannot override missing proof. Safe refusal does not establish a functioning
@@ -273,6 +300,41 @@ without such certification. Campaign and sentinel seed results consume
 `correct`/`incorrect` meanings and records unavailable comparison as `inconclusive`;
 missing independent proof alone does not change a measured pass. See
 [comparison and denominator rules](deployment-evidence.md#diagnostic-comparison-and-campaign-accounting).
+
+Per-seed campaign durability uses the protected [progress journal](../campaign_recovery.md).
+Derived compatibility ledgers never substitute for committed seed state or live
+export authority.
+
+The dedicated semantic policy prevents additional processes and threads through
+architecture-aware enforcement. It requires full bounded stdin delivery, both
+output EOFs, no overflow, valid UTF-8, exit zero, effective limits and confirmed
+scope termination/reaping. Address-space/CPU limits are per-process; demonstrated
+creation denial limits the candidate workload to one process. `RLIMIT_AS` is not
+a total kernel-memory or RSS guarantee. Aggregate scratch and descriptor/metadata
+caps remain independently enforced. Process-group termination does not establish
+scope-wide cleanup; generic detached-descendant probes remain separate from
+semantic creation-denial probes. Missing evidence refuses execution/authority.
+
+Production adapters durably attribute callbacks and reconcile registered
+billable dispatches before declaring complete coverage. Callback prices alone
+cannot establish completeness. Both Hermes and SWE-bench restore cumulative
+known spend before dispatch; unknown cost or residual liability blocks finite
+budgets. Read-only `CampaignJournal.inspect` validates pinned records without
+writer initialization, repair or session append. Monitor annotations require
+complete ordered queue identity; secondary reconstruction failures preserve the
+original exception. See [campaign recovery](../campaign_recovery.md).
+
+The planned version `"3"` progress contract requires durable starts before execution,
+actual attempt-bound costs once and
+terminals before aggregation. Resume rebuilds due stages, futility/limit decisions
+and completion before scheduling. Interrupted starts retain uncertain work/spend;
+exclusive validated durable reopen resolves persistence uncertainty. Monitor
+progress is explicit through `progress_root`; its queue is a derived view. Total cost ceiling
+increases require a durable [session audit](../campaign_recovery.md#budget-ceilings-and-session-audits);
+other experiment limits remain identity-bound. Version `"3"` uses canonical
+decimal-string money and durable dispatch/reconciliation records. Existing
+version `"2"` numeric history retains its original interpretation and is not
+automatically migrated.
 
 ## Authentication
 

@@ -1,9 +1,93 @@
+---
+title: Architecture
+description: System boundaries, verification authority, and durable campaign design
+doc_type: explanation
+maintenance: Update with related contracts and module boundaries
+---
+
 # Architecture
 
 For repository execution, see [execution safety and trustworthy verdicts](concepts/execution-safety.md).
 Its trust boundaries cover setup, imports, tests, benchmarks, validation, and
 monitor attempts; the [contract reference](reference/execution-contracts.md)
 defines the evidence required before a deployment comparison is authoritative.
+
+## Protected code verification and campaign state
+
+**[PLANNED — Implementation Pending]** This section describes intended
+architecture. Protected setup and retained-byte prerequisite replay still refuse.
+Complete billing coverage, SWE-bench residual-ledger integration and actual
+immutable execution identity checks remain unresolved. Provisioning a host cannot
+resolve these code gaps. See [verification blockers](protected_verification.md)
+and [recovery blockers](campaign_recovery.md); the design below is not a claim
+that a production accepting/export or complete recovery path exists.
+
+The protected verifier and campaign journal have separate authority boundaries.
+[Verification evidence](protected_verification.md#evidence-boundary) governs
+acceptance/export; [recovery](campaign_recovery.md#recovery-boundary) governs
+reuse of committed measurements. Neither native validation nor live authority
+can be reconstructed from a serialized success record.
+
+Tier 4 separates cooperative diagnostic measurement from export authority.
+The [semantic verifier](protected_verification.md) supports one captured Python
+JSON command, with reviewed cases and expected values kept in the trusted
+parent. Each case runs in a fresh readonly environment with an independently
+provisioned runtime. Invocation-specific protected setup, complete transport and owned
+descendant cleanup are prerequisites. A protected bootstrap reports effective
+namespaces, mounts, capabilities, seccomp and resource bounds before the parent
+approves candidate entry. Authority/control descriptors close before entry;
+host probes cannot substitute for that setup observation. Candidate assertions and pytest plugins
+cannot issue authority.
+
+After repair cleanup, the parent retains exact bytes, target and ordinary mode.
+An immutable prerequisite plan is resolved from trusted gate configuration
+before diagnostics. Scope/surface checks and protected diagnostic,
+regression/oracle and configured benchmark replay bind to that snapshot.
+Unsupported applicable evaluators refuse acceptance; mutable diagnostic records
+cannot satisfy the plan. Parent-registered observations are
+sealed at the final execution epoch before semantic cases. Raw Git blob hashes
+bind baseline identity. Hashes detect drift; independently protected ownership
+and safe ancestors establish the runtime/specification boundary.
+
+An accepted assessment is serializable data without authority. With an explicit
+prepared export root, the gate result owns a registered opaque single-use handle
+and snapshot lease. Without that root, even accepted assessment has `deploy=false`.
+Contexts and results are closable owners; context closure revokes issued child
+authority. Re-finalization, failure and every later candidate dispatch revoke
+before work. Process-incarnation and exact registry identity reject copy, serialization,
+forgery, fork inheritance and replay. Atomic claim has at most one winner.
+
+Export consumes authority even on failure and installs retained bytes/mode through
+destination parents pinned at preparation, transferring their descriptors and
+retained payload atomically at claim. Receipts distinguish no replacement, durable
+replacement, uncertain durability and unknown replacement. A claimed export keeps
+its payload through concurrent owner closure. See the
+[ownership contract](protected_verification.md#gate-to-export-ownership).
+This finite-case conformance path supports one Python file, not packages,
+arbitrary pytest certification or publication.
+
+Generic path, execution and lifecycle facilities stay in core; semantic and
+campaign state modules stay in Tier 4. Core never imports a tier. Existing
+validation adapter composition remains lazy. Both monitor harvesting and attempts
+connect to Tier 4 through `evolution.composition.monitor_code`; monitor domain
+modules consume structural inputs/callables and import no concrete code tier.
+No DSPy migration or new provider path is needed.
+
+[Campaign state](campaign_recovery.md) durably records starts before execution,
+observed costs once, and seed completion before dependent aggregation. A
+protected, exclusively locked journal validates identities,
+sequence, hash chain and transitions with synchronization barriers. Resume
+reuses durable measurements, rebuilds derived outputs and honors committed stage
+decisions and configured limits before scheduling. Planned version `"3"` append/replay
+share one transition validator. A crash before commit preserves an inconclusive
+attempt and unknown possible spend; it does not promise exactly-once execution.
+Version `"3"` adds canonical decimal-string money and durable dispatch/coverage
+records. Existing version `"2"` numeric history is preserved without reinterpretation
+or automatic migration.
+Diagnostic seed success, intentional abstention and export
+acceptance retain separate meanings. A mutable total cost ceiling is separate
+from immutable experiment limits; increases take effect only through a durable
+[session audit](campaign_recovery.md#budget-ceilings-and-session-audits).
 
 ## One-line model
 

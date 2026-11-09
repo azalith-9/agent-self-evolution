@@ -11,9 +11,9 @@ def _res(deploy, guards, reason=""):
                                     "reason": reason, "guards": guards})
 
 
-def test_deployed():
+def test_constructed_result_cannot_claim_deployment():
     assert rejecting_guard(_res(True, {"bug_tests_passed": True,
-                                       "oracle_match": {"new_vs_oracle": []}})) == "deployed"
+                                       "oracle_match": {"new_vs_oracle": []}})) == "other"
 
 def test_freeze_first():
     assert rejecting_guard(_res(False, {"freeze_ok": False})) == "freeze"

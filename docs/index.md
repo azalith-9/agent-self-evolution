@@ -1,3 +1,10 @@
+---
+title: Knowledge base index
+description: Find task-focused guides and API, schema, and architecture references
+doc_type: reference
+maintenance: Update with related contracts and module boundaries
+---
+
 # Knowledge Base Index
 
 This directory is a structured documentation set for **`agent-self-evolution`** — a Python framework that improves the artifacts an agent runs on and ships only the changes that prove out. It evolves *text* surfaces — skill files, tool descriptions, and system-prompt sections — via DSPy + GEPA behind a paired-bootstrap / closed-loop deploy gate, and repairs *code* surfaces — tool implementations — via iterative test-feedback repair behind an executable-oracle gate. A propose-only triage sentinel finds repair candidates in a target repo's git stream, and an orthogonal closed-loop validation surface runs the real agent against a JSONL task suite.
@@ -19,7 +26,8 @@ readers to the source for exact behavior.
 | **How a tool-description run works end-to-end** | `workflows.md` (Workflow 9) → `components.md` (`evolve_tool.py`) |
 | **How a prompt-section run works end-to-end** | `workflows.md` (Workflow 12) → `components.md` (`evolve_prompt_section.py`) |
 | **How a Claude CLAUDE.md convention run works** | `workflows.md` (Workflow 13) → `components.md` (Claude Code backend) |
-| **Why a green code-repair run cannot deploy** | `reference/deployment-evidence.md` → `howto/run-contained-repairs.md` |
+| **Verification and export of a code repair** | `protected_verification.md` → `tutorials/verify-json-command.md` → `reference/deployment-evidence.md` |
+| **Recovery of completed campaign seeds** | `howto/resume-code-campaign.md` → `campaign_recovery.md` |
 | **How a code-repair run works (Tier 4)** | `workflows.md` (Workflow 14) → `components.md` (`evolution/code/`) |
 | **How the triage sentinel works (Tier 5)** | `workflows.md` (Workflow 15) → `operating_the_sentinel.md` → `components.md` (`evolution/monitor/`) |
 | **What's in `triage_queue.json` / `lineage.json` / a code `gate_decision.json`** | `data_models.md` (Tier-4/5 artifacts) |
@@ -62,9 +70,21 @@ readers to the source for exact behavior.
 - [Execution and evaluation contracts](reference/execution-contracts.md) defines
   internal adapter obligations, environments, paths, evidence, and compatibility.
 - [Deployment evidence for code repairs](reference/deployment-evidence.md) defines
-  the planned independent verification, complete diagnostic and supervisor field
-  contracts, campaign accounting, lifecycle/replay rules, and snapshot export.
-  It specifies intended behavior without certifying the implementation.
+  diagnostic and supervisor field contracts, comparison compatibility,
+  and lifecycle/replay rules; it does not certify implementation behavior.
+- [Protected semantic verification](protected_verification.md) specifies the
+  planned contract and current implementation blockers for supported
+  artifacts, strict JSON, runtime configuration, Python interfaces, protected setup,
+  complete prerequisite replay, native evidence and single-use exact-byte export.
+- [Verify a JSON command and inspect native evidence](tutorials/verify-json-command.md)
+  exercises the protocol and specifies planned production acceptance, rejection,
+  exact-byte export and replay checks; protected demonstrations remain blocked.
+- [Campaign progress and recovery](campaign_recovery.md) specifies the planned
+  version `"3"` journal, decimal-string money, dispatch/reconciliation records,
+  per-seed commits and session budgets. It distinguishes scoped recovery from
+  unfinished billing coverage, SWE-bench residual budgets and identity checks.
+- [Resume a code-repair campaign](howto/resume-code-campaign.md) covers inspection
+  and the planned production recovery procedure, with its implementation blockers.
 - [Run repairs with contained execution](howto/run-contained-repairs.md) covers
   prerequisites, configuration, existing controls, and refusal handling.
 - [Validate a task fixture without an agent](tutorials/validate-task-fixtures.md)
@@ -114,3 +134,18 @@ The fast-moving parts to verify against source when consulting these docs:
 - Saturation pre-flight default thresholds (`evolution/core/saturation_check.py:DEFAULT_THRESHOLDS`) — likely to be calibrated as more real-world bands are observed
 
 When updating: edit the relevant file, then check whether the "Question routing table" above still points to the right place. The index file is loaded into AI-assistant context every conversation, so small accuracy improvements here pay off broadly.
+
+## Findings artifact location
+
+The design's proposed root `FINDINGS.md` is replaced by the retained
+[partial findings synthesis](../.review/implementation-20261109/FINDINGS.md).
+This is an explicit location amendment: the synthesis is review evidence and
+belongs with its source reviews, outside durable product documentation. No
+second root copy is maintained. The synthesis links the original findings,
+individual dispositions and surviving security/architecture reviews.
+
+It remains partial and evidence-limited. It establishes no completed full suite,
+native accepting/export path, implementation acceptance or successful delivery
+equality proof. The [documentation handoff](../.review/implementation-20261109/DOCUMENTATION-CHECKPOINT.append.md)
+preserves validation limits and interrupted work; it is not a completed
+validation result.

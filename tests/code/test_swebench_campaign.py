@@ -17,7 +17,7 @@ def test_campaign_runs_with_injected_runner(tmp_path):
     def fake_runner(c):
         return OrganismResult(tool=c.tool_path, fix_sha=c.fix_sha, seeds=[c.fix_sha != "i2"])
     report = run_campaign(tmp_path, output_dir=tmp_path, max_organisms=3, stages=(3,),
-                          candidates=cands, organism_runner=fake_runner)
+                          candidates=cands, seeds=1, organism_runner=fake_runner)
     assert report["deploy_reachable"]["n"] == 3
 
 def test_arm_cost_ledger_sets_ceiling(monkeypatch):

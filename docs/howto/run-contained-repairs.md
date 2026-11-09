@@ -16,6 +16,7 @@ share the [execution contract](../reference/execution-contracts.md).
 - [Prepare the runtime separately](#prepare-the-runtime-separately)
 - [Select roots and credentials](#select-roots-and-credentials)
 - [Use the repair containment controls](#use-the-repair-containment-controls)
+- [Configure protected semantic verification](#configure-protected-semantic-verification)
 - [Inspect the result before relying on it](#inspect-the-result-before-relying-on-it)
 
 ## Prepare the runtime separately
@@ -89,18 +90,58 @@ uv run --no-sync python -m evolution.code.evolve_code --help
 ```
 
 Expected output begins with `Usage:` and lists repair options; exit status is 0.
-The command requires an already installed project environment; it does not download dependencies. A repair run
-itself can invoke a paid proposer and needs separate authorization.
+The command requires an already installed project environment; it does not
+download dependencies. For a prepared active virtualenv outside the worktree,
+use `uv run --active --no-sync`. A repair run itself can invoke a paid proposer
+and needs separate authorization.
+
+## Configure protected semantic verification
+
+**[PLANNED — Implementation Pending]** The accepting/export steps in this
+section describe the intended interface. Protected setup and retained-byte
+prerequisite replay currently refuse. Provisioning a host or selecting these
+options cannot resolve the implementation gaps; see
+[verification blockers](../protected_verification.md).
+
+For the planned single-file Python JSON command path, supply all three options:
+`--semantic-spec`, `--verification-runtime-config` and `--runtime-id`. Keep the
+reviewed specification and runtime registry outside candidate control. The
+[semantic reference](../protected_verification.md) defines their exact schemas;
+the [credential-free tutorial](../tutorials/verify-json-command.md) exercises the
+protocol and production acceptance, rejection, export and replay checks. A repair interpreter selected with
+`--base-python` is not implicitly a trusted semantic runtime.
+
+Add `--export-to` only when a local approved existing destination root is
+prepared; it binds that root during `VerificationContext.prepare`. Assessment
+without a bound root can pass but cannot issue export authority. The
+export retains the authorized target's relative path and uses protected captured
+bytes and mode. `--no-create-pr` keeps operation local; unsupported publication
+requests fail
+before preparation, candidate execution or spend. No semantic
+configuration leaves diagnostics usable and export refused. Partial semantic
+configuration fails validation rather than falling back to an implicit runtime.
+
+Campaign execution also requires containment by default. Resume reuses committed
+seeds through its [progress journal](../campaign_recovery.md); a historical
+organism ledger alone does not establish per-seed recovery.
 
 ## Inspect the result before relying on it
+
+Diagnostic artifacts remain inspectable but cannot authorize export. The CLI
+holds the
+live gate result open through export and closes it on every exit; see
+[ownership and disposal](../protected_verification.md#gate-to-export-ownership).
 
 Read `gate_decision.json` and `repair_trace.json` in the chosen output directory.
 Confirm that the evaluated source and test scope match the intended baseline.
 Inspect `deployment_verification` as well as containment capabilities,
 supervisor completion, cleanup, required-test identities, and checked Git scope.
 An accepted verification must bind the same bytes and modes used by surface
-checks, tests, and export. Later benchmark or subprocess mutations invalidate
-prior acceptance. Export consumes the stored accepted snapshot and verifies the
+checks, tests, and export. Applicable benchmarks and every selected execution prerequisite replay against
+retained read-only bytes before sealing. An unsupported protected evaluator
+leaves the assessment unverifiable; diagnostic mappings cannot replace replay.
+Every later candidate dispatch revokes authority before execution and requires
+fresh assessment. Export consumes the stored accepted snapshot and verifies the
 destination.
 An absent field in an older artifact means unknown protection or completion.
 

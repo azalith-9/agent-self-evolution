@@ -1,3 +1,10 @@
+---
+title: Operating the triage sentinel
+description: Scan, attempt, budget scheduling, and optional durable recovery
+doc_type: howto
+maintenance: Update with monitor, cost accounting, or recovery behavior
+---
+
 # Operating the triage sentinel
 
 The sentinel is the **supply side** of the code-evolution loop: it scans a target
@@ -79,12 +86,10 @@ and annotates each queue row with an `attempt` block. It still **never opens a P
 it records whether the loop *could* produce an oracle-matching fix for review.
 A diagnostic success does not authorize deployment or export.
 
-**[PLANNED - Implementation Pending]** The separation below specifies intended
-accounting behavior; it does not certify the current implementation. Oracle
-`correct`/`incorrect` remain diagnostic comparison verdicts. Both gates separately
-require accepted independent verification and snapshot integrity for deployment.
-`CodeGateResult.deploy` is deployment eligibility, so campaign and sentinel seeds
-must consume diagnostic comparison outcomes rather than `gate.deploy`.
+Oracle `correct`/`incorrect` are diagnostic comparison verdicts. Campaign and
+sentinel seeds consume diagnostic comparison outcomes rather than `gate.deploy`.
+Independent verification and snapshot integrity are separate deployment
+requirements; see the [verification evidence boundary](protected_verification.md#evidence-boundary).
 
 Verdicts in the annotated `triage_queue.json`:
 
@@ -94,7 +99,7 @@ Verdicts in the annotated `triage_queue.json`:
 | `not_valid` | the parent doesn't cleanly fail what the fix passes — not a clean single-tool bug |
 | `source_missing` / `too_large` / `worktree_failed` | skipped before repair (source gone, too big for a whole-file rewrite, or isolation setup failed) |
 | `run_inconclusive` | required diagnostic observations were incomplete (for example a hang, collection failure, or unknown cleanup); retain seed identity, reason and completed observations for resumption rather than declaring a failed repair |
-| `cost_ceiling` | the `--max-cost-usd` cap was hit; remaining candidates were not attempted |
+| `cost_ceiling` | the cost callback stopped further work; already in-flight calls can still incur cost |
 
 Independent verification can refuse deployment with
 `independent_test_verification_unavailable` even when every diagnostic comparison
@@ -103,14 +108,43 @@ missing independent proof alone is neither `incorrect` nor `run_inconclusive`.
 A demonstrated diagnostic failure remains a failed seed. If diagnostic measurement
 itself is unavailable, do not coerce it to false or report a partial set as a
 completed attempt. Report requested, measured, and inconclusive counts separately
-and resume only outstanding seeds with fresh invocation identities. Reusing queue
-observations restores accounting only, never deployment authority. See the
+and, under the complete recovery contract, resume only outstanding seeds with
+fresh invocation identities. Reusing queue observations restores accounting
+only, never deployment authority. See the
 [canonical comparison and campaign contract](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting)
 and [artifact fields](data_models.md#campaign_ledgerjsonl--campaign_reportjson).
 
 `--max-cost-usd` is **required** whenever `--attempt-top > 0` (the CLI refuses to run
-the repair loop uncapped) and is a hard ceiling: the run aborts cleanly with a partial,
-still-valid queue when cumulative LLM cost crosses it. The scan itself needs no cap.
+the repair loop uncapped). It guards further scheduling using observed LLM cost;
+in-flight calls may overshoot it. It is not a provider billing cap. The scan
+itself needs no cap.
+
+Durable progress is optional: set `--progress-root` to use campaign seed commits
+and reuse the same root and ordered queue on a compatible retry. Without it,
+queue annotations do not provide durable per-seed recovery. Monitor reconstruction
+uses pinned read-only `CampaignJournal.inspect` after writer closure, including
+exceptional exits. It validates the complete ordered candidate identity and every
+selected queue row before annotation, rejecting duplicate queue keys. Inspection
+performs no initialization, repair or session append. A reconstruction failure
+preserves the original execution exception or cancellation. See the
+[resume guide](howto/resume-code-campaign.md#recover-monitor-attempts).
+
+**Production recovery [PLANNED — Implementation Pending].** Complete billing
+coverage, paid-preparation reconciliation, SWE-bench residual-ledger integration
+and actual immutable identity checks remain unresolved. Scoped recovery and
+callback attribution do not establish these guarantees. The planned version
+`"3"` records and monetary encoding are not implemented by the version `"2"`
+writer. See [recovery blockers](campaign_recovery.md).
+
+The intended [campaign recovery contract](campaign_recovery.md) applies the total ceiling
+to measured and estimated cost across all sessions. Attributed callbacks alone
+cannot establish complete billing coverage; dispatch reconciliation retains
+unknown liability. A durable current-process session and restored residual
+ledger precede further spending. Interrupted work and completed legacy organisms
+without complete cost evidence remain unknown even when some callbacks exist;
+`campaign_accounting_incomplete` blocks finite-budget dispatch. A larger ceiling
+cannot turn unknown cost into zero. Progress records and queue annotations carry
+no export authority.
 
 ## Scheduling the scan (opt-in, macOS launchd)
 

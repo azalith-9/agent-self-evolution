@@ -42,9 +42,18 @@ class ExecutionRequest:
     cleanup_timeout_seconds: float
     invocation_id: str
 
+    stdin_bytes: bytes = field(default=b"", repr=False)
+    max_stdout_bytes: int = 1048576
+    max_stderr_bytes: int = 1048576
+
     _runtime: tuple[str, str] | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
+        if type(self.stdin_bytes) is not bytes:
+            raise ValueError("stdin_bytes must be bytes")
+        for limit in (self.max_stdout_bytes, self.max_stderr_bytes):
+            if type(limit) is not int or not 1 <= limit <= 16777216:
+                raise ValueError("capture bounds must be positive integers up to 16 MiB")
         if not self.argv or not self.argv[0] or any(not isinstance(x, str) or "\0" in x for x in self.argv):
             raise ValueError("argv must contain nonempty strings without NUL bytes")
         if not Path(self.cwd).is_absolute():

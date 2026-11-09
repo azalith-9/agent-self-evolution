@@ -6,6 +6,7 @@ characterization (LOC/hunks/reason) are written for report.py."""
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,7 +16,7 @@ from typing import Optional
 import click
 from rich.console import Console
 
-from evolution.code.campaign import PROPOSER_MAX_TOKENS, Skip, run_campaign
+from evolution.code.campaign import PROPOSER_MAX_TOKENS, Skip, diagnostic_seed_result, run_campaign
 from evolution.code.harvest import stratify
 from evolution.code.campaign_report import OrganismResult
 from evolution.code.gate import run_code_oracle_gate
@@ -65,7 +66,7 @@ def build_swebench_runner(*, seeds: int, max_rounds: int, proposer_model: Option
     lm = dspy.LM(rlm.model, engine="litellm", **rlm.lm_kwargs, temperature=0.7, max_tokens=PROPOSER_MAX_TOKENS)
     engine = RepairEngine(build_dspy_proposer(lm), max_rounds=max_rounds)
 
-    def runner(c: _Cand):
+    def runner(c: _Cand, *, seed_progress=None):
         inst = c.instance
         try:
             env = SWEbenchEnv.create(inst)
@@ -84,17 +85,32 @@ def build_swebench_runner(*, seeds: int, max_rounds: int, proposer_model: Option
                                      "gold_loc": org.gold_loc, "gold_hunks": org.gold_hunks,
                                      "emulated": env.emulated})
             seed_results = []
-            for _ in range(seeds):
+            for index in range(seeds):
+                if seed_progress is not None and index in seed_progress.completed:
+                    seed_results.append(seed_progress.completed[index]['diagnostic_status'] == 'passed')
+                    continue
+                attempt = (seed_progress.start(index, retry_of=seed_progress.latest_inconclusive(index))
+                           if seed_progress is not None else None)
                 env.reset_file(inst.gold_file)
-                repair = engine.repair(env, inst.gold_file, org.bug_tests)
+                with attempt.capture_costs() if attempt is not None else nullcontext():
+                    repair = engine.repair(env, inst.gold_file, org.bug_tests)
                 gate = run_code_oracle_gate(
                     env, tool_relpath=inst.gold_file, test_relpath="(swebench)",
                     bug_tests=org.bug_tests, oracle_failures=org.oracle_failures,
                     base_src=org.base_src, repair_result=repair, pass_to_pass=inst.pass_to_pass)
                 status = gate.decision.get("diagnostic_comparison", {}).get("status")
-                if status not in {"passed", "failed"}:
-                    return Skip("run_inconclusive")
-                seed_results.append(status == "passed")
+                try:
+                    if status not in {"passed", "failed"}:
+                        if seed_progress is not None:
+                            seed_progress.record_attempt(index, attempt_id=attempt.attempt_id,
+                                reason='run_inconclusive', observation_digest=None)
+                        return Skip('run_inconclusive')
+                    if seed_progress is not None:
+                        attempt.commit(dict(diagnostic_seed_result(gate.decision),
+                            cost_observation_ids=attempt.cost_references()))
+                    seed_results.append(status == 'passed')
+                finally:
+                    gate.close()
             return OrganismResult(tool=inst.repo, fix_sha=inst.instance_id, seeds=seed_results)
         finally:
             env.destroy()
@@ -135,7 +151,7 @@ def main(max_organisms, stages, seeds, repair_rounds, max_cost_usd, limit_instan
     run_campaign(output_dir, output_dir=output_dir, max_organisms=max_organisms,
                  stages=tuple(int(s) for s in stages.split(",")), seeds=seeds, max_rounds=repair_rounds,
                  max_cost_usd=max_cost_usd, candidates=candidates,
-                 organism_runner=runner)
+                 progress_runner=runner)
     from evolution.core.lm_timing_callback import COST_LEDGER  # noqa: PLC0415
     (output_dir / "cost.json").write_text(json.dumps(COST_LEDGER.summary(), indent=2))
     (output_dir / "characterization.json").write_text(json.dumps(characterization, indent=2))

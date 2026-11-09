@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from evolution.code.harvest import Candidate, _git, harvest_candidates
+from evolution.composition.monitor_code import _git, harvest_candidates
 
 # Dependency-manifest filenames whose change in a fix commit marks a
 # dependency-regression repair (a bump broke a test; the fix adapted the tool).
@@ -51,7 +51,7 @@ def _is_dep_file(path: str) -> bool:
     return name in _DEP_FILES
 
 
-def classify(repo: Path, c: Candidate) -> RepairCandidate:
+def classify(repo: Path, c: object) -> RepairCandidate:
     """Tag a candidate by kind + commit date from a single ``git show``."""
     res = _git(repo, "show", "--name-only", "--format=%cI", c.fix_sha)
     lines = [ln.strip() for ln in res.stdout.splitlines() if ln.strip()]

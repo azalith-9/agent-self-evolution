@@ -5,17 +5,30 @@ doc_type: reference
 maintenance: Update with verifier, receipt, diagnostic, or export contract changes
 ---
 
-# [PLANNED - Implementation Pending] Deployment evidence for code repairs
+# Deployment evidence for code repairs
 
-This is the canonical specification for the intended evidence contracts below.
-It does not certify source behavior, native containment, or implementation tests.
-The schema tables are normative; source adapters must implement and validate them
-before these guarantees can be claimed.
+This reference specifies diagnostic and supervisor evidence contracts.
+It does not certify source behavior or native enforcement. The
+[semantic verifier](../protected_verification.md) defines protected
+JSON-command checks, runtime configuration, live authorization and exact-byte
+export. [Campaign recovery](../campaign_recovery.md) defines durable seed commits.
+The schema tables are normative. Native guarantees additionally require actual
+host evidence; neither an audit nor this reference certifies enforcement. See
+[verification evidence](../protected_verification.md#evidence-boundary) and
+[recovery boundaries](../campaign_recovery.md#recovery-boundary).
 
-Both code gates use `evolution/code/deployment_evidence.py` to decide whether
-execution evidence is eligible for deployment. The module is internal. Existing
-repair and campaign entry points remain unchanged; there is no attestation
-service, public certificate constructor, or CLI override.
+**[PLANNED — Implementation Pending]** Protected accepting/export behavior
+below is the intended contract. Protected setup and retained-byte prerequisite
+replay currently refuse; effective controls and continuous runtime/path
+protection remain unresolved. A provisioned host cannot resolve these code gaps.
+See [verification blockers](../protected_verification.md).
+
+Both code gates use `gate.finalize_verification` as the intended accepting boundary.
+`deployment_evidence.verify_deployment(env, *, tool_relpath, verification=None)`
+is a refusal-only compatibility helper: its optional keyword is inert and it
+always returns `unverifiable / independent_test_verification_unavailable`.
+Explicit semantic configuration selects the protected verifier. There is no
+attestation service, public certificate constructor or cooperative-output override.
 
 ## Contents
 
@@ -25,6 +38,7 @@ service, public certificate constructor, or CLI override.
 - [Supervisor receipt schema 1](#supervisor-receipt-schema-1)
 - [Diagnostic comparison and campaign accounting](#diagnostic-comparison-and-campaign-accounting)
 - [Comparable regression evidence](#comparable-regression-evidence)
+- [Snapshot prerequisite observations](#snapshot-prerequisite-observations)
 - [Snapshot and export contract](#snapshot-and-export-contract)
 - [Capability limits](#capability-limits)
 
@@ -80,7 +94,7 @@ recreates that authority. Missing or unsupported versions do not imply acceptanc
 
 | Status | Meaning | Deployment |
 |---|---|---|
-| `accepted` | Independent proof and all integrity prerequisites satisfy the gate's behavioral rules | Eligible only while the accepted snapshot remains valid |
+| `accepted` | Specified semantic cases and all applicable prerequisites satisfy their rules | Export additionally requires a bound root and live issued authority |
 | `rejected` | A checked violation, such as a required failure, scope change, or payload mismatch, is established | Refused |
 | `unverifiable` | Proof is missing, invalid, incomplete, unbound, or the required capability is unavailable | Refused; retain available diagnostics |
 
@@ -319,21 +333,24 @@ when comparison cannot be established; do not overload `incorrect` for missing
 proof. These oracle decisions remain measurement outcomes. The held-out gate
 retains `decision="deploy"` or `"reject"` as deployment decisions and uses the
 separate comparison object for its diagnostic result. In either gate,
-`CodeGateResult.deploy` is true only when independent verification is accepted
-and every deployment prerequisite holds for the current snapshot. Legacy oracle
+`CodeGateResult.deploy` is a read-only observation of current issued registry
+authority, requiring accepted verification, all prerequisites and a bound export
+root. Assessment without an export root can be accepted with `deploy=false`. Legacy oracle
 `correct` records or historical `deploy=true` values contain no new authority.
 
-Campaign `seeds` retains its Boolean-list meaning for fully measured organisms:
+Durable completion uses the [versioned seed journal](../campaign_recovery.md),
+not an uncommitted in-memory Boolean. Campaign `seeds` retains its Boolean-list
+meaning for fully measured organisms:
 each true is a diagnostic comparison pass and each false an established failure.
-`deploy_reachable` retains the compatibility rule `n_correct > 0` and
-`2 * n_correct >= len(seeds)` (at least half, including an even-seed tie; two of
-three for the default). Sentinel `correct_seeds` counts those true values and its
+`deploy_reachable` applies only after every requested seed is measured and
+retains the compatibility rule `n_correct > 0` and `2 * n_correct >= len(seeds)`
+(at least half, including an even-seed tie; two of three for the default). Sentinel `correct_seeds` counts those true values and its
 integer `seeds` is their total, not a count of deployment acceptances.
 
 Unavailable independent proof alone neither changes these Booleans nor removes
 an organism from the diagnostic denominator. If diagnostic measurement itself
 is inconclusive, persist the seed identity, reason, and completed observations
-under `run_inconclusive`; do not coerce it to false, shrink the requested seed
+as `seed_inconclusive` with its matching durable start; do not coerce it to false, shrink the requested seed
 count, or finalize a partial Boolean row as a fully measured organism. Resume
 only outstanding measurements with new invocation IDs. Reports distinguish
 requested, measured, and inconclusive organisms/seeds and never silently drop
@@ -358,6 +375,81 @@ remain protected in both runs.
 A successful comparison is retained as a diagnostic result. Deployment additionally
 requires independent verification and all snapshot/integrity prerequisites.
 
+## Protected execution evidence schema 2
+
+Protected execution evidence is separate from generic supervisor schema `"1"`.
+All fields below are required. Unknown observations are null; zero counts require
+an actual observation. A private registry associates the exact returned result
+object with a live invocation-bound enforcement lease. A serialized receipt,
+`enforcement_id` string, canary or caller-created `ProcessResult` cannot create
+that lease or authorize semantic acceptance. The production launcher issues a
+lease only for its exact returned result after protected setup observation,
+parent approval before entry, complete bounded transport and confirmed cleanup.
+The binding includes process incarnation, invocation, execution mode, complete
+runtime/bootstrap/backend/policy identities, source bytes/mode and request.
+Constructors and caller-populated registries cannot establish it.
+
+| Field | Contract |
+|---|---|
+| `schema_version` | String `"2"` |
+| `invocation_id`, `scope_id` | Unique supervisor-owned identities; scope nullable until established |
+| `enforcement_id` | Nullable audit identifier for the private live lease |
+| `runtime_id`, `policy_id` | Resolved runtime and effective policy identities |
+| `snapshot_id`, `source_sha256`, `mode`, `request_sha256` | Exact retained source, ordinary mode and request binding |
+| `setup` | Exactly `status`, `observation_id`; status `established`, `refused`, `failed` or `unknown`; nullable observation digest |
+| `stdin` | Exactly `requested_bytes`, `delivered_bytes`, `closed`; delivered count and closure nullable |
+| `stdout`, `stderr` | Each exactly `observed_bytes`, `retained_bytes`, `eof`, `overflow`, `utf8_valid`, `sha256`; nullable counts, Booleans and digest |
+| `process` | Exactly `launched`, `exit_code`, `signal`, `timed_out`, `cancelled`; nullable observed facts |
+| `cleanup` | Exactly `termination_confirmed`, `reaping_confirmed`, `deadline_expired`, `supervisor_complete`; nullable Booleans |
+| `receipt_id` | Domain-separated identity of the receipt excluding itself |
+
+Counts are bounded nonnegative integers, never Booleans. Exit/signal values are
+integers when observed. Raw retained output stays private and bounded; strict
+parsing never uses replacement decoding. Complete output hashes bind every
+observed byte; truncated retention cannot masquerade as complete output.
+
+The policy identity binds backend/bootstrap/filter bytes and modes, supervisor
+implementation, architecture/syscall ABIs, runtime, effective mounts/namespaces,
+capabilities, environment/descriptor allowlist, hard CPU/address-space/process
+limits, aggregate scratch and metadata/FD caps. The setup observation binds that
+policy and host-capability evidence to this invocation. Trusted setup precedes
+candidate entry over a private channel, then closes all nonstandard control and
+authority descriptors. Failed setup prevents entry. Process access, tracing and
+process filesystems cannot expose parent state. Later host probes or an audit
+mapping cannot supply missing invocation evidence.
+
+Lease creation and lookup stay internal to `core.protected_execution`; core
+supplies process facts and imports no tier. Only the protected Tier-4 parent
+compares expected responses. See [execution policy](../protected_verification.md#execution-policy-and-completion).
+
+## Snapshot prerequisite observations
+
+The parent resolves an immutable prerequisite plan from trusted gate
+configuration before diagnostic execution. It replays each applicable
+requirement against retained bytes through protected execution; an unsupported
+protected evaluator makes the assessment unverifiable. Diagnostic mappings
+cannot determine the required population or supply an observation.
+
+Version `"2"` observations have exactly `schema_version`, `kind`, `applicability`,
+`applicability_reason`, `snapshot_id`, `baseline_id`, `target`, `mode`,
+`source_sha256`, `command_id`, `test_inputs_id`, `configuration_id`, ordered
+`invocation_ids`, ordered `receipt_ids`, `execution_epoch_start`,
+`execution_epoch_end` and `status`.
+
+`kind` is `scope`, `surface`, `diagnostic`, `regression` or `benchmark`;
+`applicability` is `required` or `not_applicable`. `status` is `passed`, `failed`,
+`incomplete` or `not_applicable`. Inapplicable checks require a policy reason and
+have no invented invocation. Executed checks require validated transport/cleanup
+receipts and before/after bindings to the retained source. Parent registry
+provenance establishes an observation, not a caller-constructed mapping or hash.
+
+Raw baseline blobs, canonical target, ordinary mode and retained candidate bytes
+bind every prerequisite. Seal the final epoch only after all applicable
+prerequisite execution and cleanup. Missing or stale evidence refuses authority.
+The [semantic reference](../protected_verification.md#errors-and-persisted-evidence)
+defines the separate version `"2"` audit and protected transport facts; generic
+supervisor schema `"1"` below does not supply semantic completion by itself.
+
 ## Snapshot and export contract
 
 Certification uses protected source, tests, configuration, runtime and evidence.
@@ -368,10 +460,25 @@ protection is refused instead of replaced by pre/post hashes.
 The parent captures exact candidate bytes and mode, baseline and trusted-input
 identities, required checks, and invocation binding. Scope and surface checks
 consume this snapshot; an earlier `RepairResult.final_source` string alone does
-not identify the tested payload. Every later candidate-controlled execution,
-including a benchmark, requires integrity reassessment. Relevant changes
-invalidate prior acceptance and require fresh verification.
+not identify the tested payload. Applicable tests, regression/oracle and benchmark executions bind to the retained
+read-only snapshot before sealing. Every later candidate dispatch, including a
+failed launch, first revokes authority and requires fresh assessment. Earlier
+writable diagnostics cannot certify a later capture.
 
+The [single-use export contract](../protected_verification.md#authorization-and-export)
+defines issued/claimed/consumed or issued/revoked authority and replacement-aware errors.
+The gate transfers its live authorization and snapshot lease to
+`CodeGateResult.export_authorization`; the CLI passes that handle directly to
+export in the same parent process and closes the result in `finally`. Unexported
+results release storage on close; claimed exports release it after success or
+failure cleanup. The compact summary and immutable `SemanticAssessment` carry no handle. Context
+closure and re-finalization revoke unused authority. Copying, serialization,
+fork inheritance, forged identity and replay cannot restore it. Claim consumes
+authority even on a wrong destination or installation failure. Version `"2"`
+receipts distinguish `not_replaced`, `replaced_durable`,
+`replaced_durability_uncertain` and `replacement_unknown`. Only durable verified
+replacement succeeds; retry requires fresh authorization. See the complete
+[ownership contract](../protected_verification.md#gate-to-export-ownership).
 Export uses stored accepted snapshot bytes and mode under a protected final
 verification/export boundary that prevents concurrent mutation. It rechecks the
 destination after atomic replacement. Payload mismatch, mode drift or unavailable

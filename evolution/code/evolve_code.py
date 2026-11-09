@@ -13,6 +13,7 @@ auto-merges. The gate is the point; the repair loop is commodity.
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import time
@@ -150,6 +151,13 @@ def _resolve_proposer(proposer_model: str | None):
                    "an explicit diagnostic opt-out recorded in the trace.")
 @click.option("--pr-label", default="human-review",
               help="Label applied to the PR (default 'human-review'). Empty to skip.")
+@click.option('--semantic-spec', default=None, type=click.Path(exists=True, path_type=Path),
+              help='Protected python-json-command-v1 specification.')
+@click.option('--verification-runtime-config', default=None, type=click.Path(exists=True, path_type=Path),
+              help='Explicit independently provisioned runtime registry.')
+@click.option('--runtime-id', default=None, type=str, help='Runtime key selected by the specification.')
+@click.option('--export-to', default=None, type=click.Path(exists=True, file_okay=False, path_type=Path),
+              help='Approved local export root; consumes live authorization without publication.')
 def main(
     repo_root: Path,
     tool_relpath: str,
@@ -170,8 +178,24 @@ def main(
     pr_branch_prefix: str,
     pr_draft: bool,
     pr_label: str,
+    semantic_spec: Path | None = None,
+    verification_runtime_config: Path | None = None,
+    runtime_id: str | None = None,
+    export_to: Path | None = None,
 ) -> None:
+    from evolution.code.semantic_verifier import VerificationContext
+    from evolution.code.verified_export import ExportError, export_verified
+    from evolution.code.gate import finalize_verification, _base_source
+    supplied = (semantic_spec is not None, verification_runtime_config is not None, runtime_id is not None)
+    if any(supplied) and not all(supplied):
+        raise click.UsageError('semantic-spec, verification-runtime-config and runtime-id are required together')
+    if export_to is not None and not all(supplied):
+        raise click.UsageError('local export requires explicit protected verification configuration')
+    if create_pr_flag and any(supplied):
+        raise click.UsageError('protected verification supports local --export-to; publication needs a separate reviewed path')
     require_sandbox_or_fail(require_sandbox)
+    verification = None
+    gate = None
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
                         datefmt="%Y/%m/%d %H:%M:%S")
@@ -206,10 +230,16 @@ def main(
 
     console.print(f"[bold]evolve_code[/bold] — repairing [cyan]{tool_relpath}[/cyan] "
                   f"from [dim]{base_ref}[/dim]")
+    if all(supplied):
+        verification = VerificationContext.prepare(spec_path=semantic_spec.absolute(),
+            runtime_config=verification_runtime_config.absolute(), runtime_id=runtime_id,
+            export_root=export_to.absolute() if export_to is not None else None)
     try:
         env = WorktreeEnv.create(repo_root, base_ref=base_ref, base_python=base_python,
                                  require_sandbox=require_sandbox)
     except WorktreeError as exc:
+        if verification is not None:
+            verification.close()
         console.print(f"[red]✗ worktree setup failed:[/red] {exc}")
         raise SystemExit(2)
 
@@ -253,7 +283,7 @@ def main(
             run_inputs=run_inputs,
         )
 
-        if gate.deploy and benchmark_cmd:
+        if gate.decision.get('diagnostic_comparison', {}).get('status') == 'passed' and benchmark_cmd:
             evolved_path = env.worktree / tool_relpath
             child_env = env._test_env()
             child_env.update(WORKTREE_PATH=str(env.worktree), EVOLVED_PATH=str(evolved_path),
@@ -285,13 +315,25 @@ def main(
                 gate.decision["downgraded_from"] = "deploy"  # gate passed; full suite didn't
                 gate.decision["reason"] = "full-suite benchmark failed"
 
-        if gate.deploy:
-            verification = verify_deployment(env, tool_relpath=tool_relpath)
-            gate.decision["deployment_verification"] = verification
-            if verification["status"] != "accepted":
-                gate.deploy = False
-                gate.reason = verification["reason"]
-                gate.decision.update(decision="reject", reason=gate.reason)
+        if gate.export_authorization is None:
+            gate.deploy = False
+            gate.reason = 'independent_test_verification_unavailable'
+            gate.decision.update(decision='reject', reason=gate.reason,
+                deployment_verification=verify_deployment(env, tool_relpath=tool_relpath))
+        if verification is not None:
+            finalize_verification(gate, env=env, tool_relpath=tool_relpath,
+                                  base_source=_base_source(env, tool_relpath), verification=verification)
+            audit = getattr(gate, '_semantic_audit', None)
+            if audit is not None:
+                (output_dir / 'semantic_verification.json').write_text(json.dumps(audit, indent=2))
+        if gate.deploy and export_to is not None:
+            try:
+                receipt = export_verified(gate.export_authorization,
+                                          destination_root=export_to.absolute(), target=tool_relpath)
+            except ExportError as exc:
+                (output_dir / 'export_receipt.json').write_text(json.dumps(exc.receipt, indent=2))
+                raise
+            (output_dir / 'export_receipt.json').write_text(json.dumps(receipt, indent=2))
 
         final_diff = env.diff()
         write_gate_decision(output_dir, gate.decision)
@@ -311,6 +353,10 @@ def main(
 
         raise SystemExit(0 if gate.deploy else 1)
     finally:
+        if gate is not None:
+            gate.close()
+        if verification is not None:
+            verification.close()
         env.destroy()
 
 

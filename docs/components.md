@@ -1,3 +1,10 @@
+---
+title: Components
+description: Responsibilities and composition boundaries of framework modules
+doc_type: reference
+maintenance: Update with related contracts and module boundaries
+---
+
 # Components
 
 Reference of the major modules in `evolution/`. Each entry: what it owns, the public surface, and the load-bearing implementation details that aren't obvious from the signatures.
@@ -500,18 +507,16 @@ Unlike Tiers 1-3 (GEPA evolving artifact *text* scored by a judge or behavioral 
   identities. Readers expose missing, unexpected and duplicate checks against
   independently established requirements. Schema `"1"` is limited legacy
   diagnostics. These modules confer no deployment authority.
-- `deployment_evidence.py` — internal verifier shared by both code gates. It
-  checks protected request/runtime, required-check, trusted-input, containment,
-  cleanup, scope and snapshot associations. Verification is accepted, rejected,
-  or unverifiable; missing independent semantic proof returns
-  `independent_test_verification_unavailable`. Constructed records and
-  `TestRun.authoritative` cannot authorize export. See the
-  [verification reference](reference/deployment-evidence.md).
+- `deployment_evidence.py` — refusal-only compatibility helper and compact schema
+  `"1"` summaries. `verify_deployment(..., verification=None)` retains its inert
+  keyword and always refuses. `gate.finalize_verification` is the accepting
+  boundary; candidate reports and `TestRun.authoritative` cannot certify semantics.
+  See [deployment evidence](reference/deployment-evidence.md).
 - `gate.py` — `run_code_gate` evaluates visible and distinct held-out checks,
   surface freeze, changed-file scope and the regression floor.
   `run_code_oracle_gate` compares required bug tests and full oracle scope.
   Both require complete comparable diagnostics before failure-set subtraction,
-  then shared independent verification before deployment. Required skipped,
+  then shared independent verification after configured benchmarks and cleanup, before deployment. Required skipped,
   deselected, missing, replaced or unexecuted checks do not qualify. A new-file
   floor requires complete green required execution.
 
@@ -520,14 +525,63 @@ Unlike Tiers 1-3 (GEPA evolving artifact *text* scored by a judge or behavioral 
   by integrity checks, including baseline evaluations. Later benchmarks cannot
   leave prior acceptance valid after mutation. Safe refusal preserves diagnostic
   repair and campaign results without certifying a supported deployment flow.
-  The [planned comparison contract](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting)
+  The [comparison contract](reference/deployment-evidence.md#diagnostic-comparison-and-campaign-accounting)
   keeps oracle `correct`/`incorrect` distinct from `CodeGateResult.deploy`;
   campaign seeds consume diagnostic results, including passes whose independent
   verification is unavailable.
-- `evolve_code.py` — single-tool repair CLI: `python -m evolution.code.evolve_code --repo <r> --tool tools/foo.py --visible-test … --holdout-test …` (also `--repair-rounds`, `--proposer-model`, `--floor-path`, `--min-retain-ratio`, `--benchmark-cmd`, and `--create-pr` for an opt-in **draft** human-review PR). Writes `gate_decision.json` + `repair_trace.json`. Export consumes only the
-  stored accepted snapshot bytes and mode, with final integrity and destination
-  verification; an earlier proposer string does not identify the tested payload.
-- `campaign.py` / `campaign_report.py` — staged measurement over harvested organisms (`--max-organisms`, `--seeds`, `--max-cost-usd`). The **organism is the honest unit** (seeds within one are heavily correlated); the report gives cluster-honest estimands — Wilson CIs, ICC, design-effect, effective-N — with a Wilson-lower **futility stop** (escalate N only while GREEN holds). Writes `campaign_ledger.jsonl` (resumable) + `campaign_report.json`.
+- `evolve_code.py` — single-file repair CLI with optional explicit semantic
+  specification, protected runtime registry/key and local export root. Writes
+  `gate_decision.json`, `repair_trace.json`, detailed audit and identified export
+  receipts. Unsupported publication fails before execution/spend.
+- `gate.CodeGateResult` — closable snapshot/prerequisite/authority owner;
+  read-only `deploy` reflects live registry authority. Persisted decisions cannot
+  restore it. [Ownership](protected_verification.md#gate-to-export-ownership)
+  covers re-finalization, closure and concurrent claim transfer.
+- `verification_contracts.py` / `strict_json.py` — bounded schemas, strict typed
+  JSON comparison and domain-separated identities. Raw source hashes precede decoding.
+- `verification_runtime.py` / `verified_snapshot.py` — independently provisioned
+  runtime handles and exact bytes/target/mode snapshots. Generic protected access
+  lives in `core/secure_paths.py`. Safe ancestors and protection are checked
+  separately from matching hashes.
+- `core/protected_execution.py` — protected setup currently refuses. Private
+  observations and invocation-bound lease issuance are planned, not available.
+  Intended contract: candidate-entry
+  synchronization and exact-result enforcement leases bound to invocation,
+  execution mode, complete runtime/bootstrap/backend and effective policy.
+  Missing independently protected setup or effective limits refuses execution.
+- `semantic_verifier.py` — `VerificationContext.prepare` and immutable
+  authority-free assessments. Prepared contexts own specification/runtime/policy
+  and optional destination leases. Protected retained-byte prerequisite replay
+  currently refuses; the intended contract requires complete replay on
+  retained bytes; the parent compares the full semantic case population only
+  after validating authority, transport and cleanup. Missing evidence yields
+  `unverifiable` before a mismatch can become an authoritative rejection. See
+  [protected verification](protected_verification.md).
+- `verified_export.py` — registered opaque, process-owned, single-use claims;
+  retained payload installation and replacement-aware version `"2"` receipts.
+- `native_evidence.py` — credential-free production probes and optional
+  acceptance/rejection/export/replay demonstrations, with version `"2"` evidence.
+  Generic cleanup and semantic controls have separate results. Exit `0` requires
+  complete enforced evidence; `1` records observed failure; `2` records capability
+  gaps without failure. Native acceptance requires actual completed receipts;
+  see the [evidence boundary](protected_verification.md#evidence-boundary).
+- `campaign_state.py` — exclusive version `"2"` journal, durable starts/terminals,
+  explicit cost records, per-process session audits, shared append/replay
+  validation and protected writer-only tail recovery. Read-only `inspect`
+  validates pinned records without initialization or repair. Production callback
+  attribution exists; complete dispatch reconciliation, SWE-bench residual-budget
+  integration and actual execution identity verification remain unresolved.
+  The [planned campaign boundary](campaign_recovery.md) advances to version `"3"`
+  for decimal-string money and durable dispatch/reconciliation records; existing
+  version `"2"` history is not relabeled. Unknown coverage remains unknown.
+- `campaign.py` / `campaign_report.py` — staged organism-level estimates and
+  Wilson futility stopping. Containment is required by default. Resume rebuilds
+  seed/organism/stage/limit decisions before execution; compatibility ledgers and
+  reports derive from committed state. Configured limits preserve requested and
+  unexecuted population. Explicit progress runners provide seed durability;
+  legacy runners provide organism durability. The planned SWE-bench integration
+  must verify immutable instance/image/harness identities and restore residual
+  budgets before dispatch; those guarantees remain unfinished.
 - `audit_gaming.py` / `audit_report.py` — adversarial audit of the oracle gate (direct-inject hardcoded candidate / gaming-proposer / honest-control arms), crediting the oracle only when the rejecting guard is `oracle_match`, with a post-hoc fuzzed differential (`real_fix` / `slip` / `not_fuzzable`) on fresh inputs. Reported as a per-organism map, never a scalar pass-rate.
 - `classify_strata.py` — three-stratum classification (`pure-input` / `pure-contract` / `state`) of harvested bugs for oracle-manufacture sizing. `trace.py` — assembles `repair_trace.json` (rounds + final diff) for human review (no per-hunk attribution — a review found it fragile).
 
@@ -539,6 +593,15 @@ The supply-side front-end to Tier 4: find bugs in a target repo's recent git str
 - `queue.py` — `build_queue` / `write_queue` emit a jq-aggregable `triage_queue.json` (schema_version, by_kind counts, candidate rows) and `render_report` a human-readable `triage_report.md` with the single next-step `attempt_command`.
 - `attempt.py` — `attempt_candidates` optionally runs the **validated Tier-4 repair loop verbatim** (worktree → repair → oracle gate) on the top-K and annotates each queue row with the verdict; it records whether the loop *could* repair the bug and never opens a PR.
 - `__main__.py` — the CLI: `python -m evolution.monitor --repo <r> --since-days 90` (free scan) and `--attempt-top K --max-cost-usd <cap>` (the only step that spends; `--max-cost-usd` is **required** when `--attempt-top > 0`). The wrapper/launchd template enforce scan-only scheduling — the spend step stays manual. See [`operating_the_sentinel.md`](operating_the_sentinel.md).
+
+Harvesting/classification and repair-attempt wiring uses lazy
+`evolution.composition.monitor_code` adapters. Public wrappers retain their
+signatures; monitor domain modules use local structural records/callables, with
+no concrete cross-tier imports. `attempt_candidates` adds `progress_root=None`
+and the CLI adds `--progress-root`. Configured progress freezes the ordered
+selected queue; annotations derive from its journal and persist incrementally.
+Without progress configuration attempts are explicitly nonrecoverable. The
+adapter preserves propose-only behavior and never publishes.
 
 ## New core + validation modules (post-Tier-3)
 

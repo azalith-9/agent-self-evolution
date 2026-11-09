@@ -20,7 +20,7 @@ def test_seed_results_follow_diagnostic_comparison_not_deployment(
     monkeypatch.setattr(campaign.WorktreeEnv, "create", Mock(return_value=env))
     monkeypatch.setattr(campaign, "_git_show", lambda *args: "def add(a,b): return a-b\n")
     monkeypatch.setattr(campaign, "_failures", Mock(side_effect=[set(), {"test_calc.py::test_add"}]))
-    outcomes = [SimpleNamespace(deploy=False, decision={
+    outcomes = [SimpleNamespace(deploy=False, close=Mock(), decision={
         "decision": "correct" if status == "passed" else "incorrect",
         "diagnostic_comparison": {"status": status, "reason": "complete diagnostics"},
         "deployment_verification": {"schema_version": "1", "status": "unverifiable",

@@ -83,14 +83,21 @@ cleanup invalidates deployment evidence even when the direct child exited zero.
 
 ## Test evidence and deployment
 
+**Protected path [PLANNED — Implementation Pending].** The accepting/export
+flow below describes the intended trust boundary. Protected setup and
+retained-byte prerequisite replay still refuse; host provisioning alone cannot
+close the implementation gaps. See [verification blockers](../protected_verification.md).
+
 Candidate code and its pytest interpreter are one trust domain. Fixtures, plugins,
 collection hooks, and the candidate can alter assertions or fabricate reports.
 Even a complete, correctly bound plugin report establishes only cooperative
 execution diagnostics. Moving that report into another process, adding a nonce,
 or hashing it does not establish independent semantic verification.
 
-Both code gates use the internal `code.deployment_evidence` verifier. Protected
-parent orchestration independently establishes required checks, trusted inputs,
+Both code gates coordinate assessment through `code.gate.finalize_verification`.
+The compatibility `code.deployment_evidence.verify_deployment` helper stays
+refusal-only, even when passed its inert optional keyword. Protected
+parent orchestration must independently establish required checks, trusted inputs,
 invocation and executable identity, containment, cleanup, scope, surface, and
 snapshot identity. The verifier accepts behavioral evidence only when its
 assertions and interpretation operate beyond candidate control. Constructing a
@@ -112,10 +119,12 @@ flowchart TD
 
 The verifier distinguishes accepted proof, a demonstrated violation, and missing
 proof. When independent semantic proof is unavailable, it reports
-`independent_test_verification_unavailable` and deployment is refused. No CLI
-flag enables such proof or overrides this refusal. This keeps useful diagnostic
-repair and campaign results available; it does not certify a supported deployment
-flow. See the [verification reference](../reference/deployment-evidence.md).
+`independent_test_verification_unavailable` and deployment is refused. The
+[verifier](../protected_verification.md) obtains independent observations
+for reviewed JSON-command cases; selecting it does not promote cooperative
+pytest records into proof. Diagnostic repair and campaign results remain useful
+when semantic authorization is unavailable. See the
+[verification reference](../reference/deployment-evidence.md).
 
 Regression subtraction uses complete, comparable baseline and candidate runs
 with matching reviewed checks and trusted inputs. Missing, skipped, deselected,
@@ -130,7 +139,12 @@ the compiled-floor path. See [validation state](../reference/execution-contracts
 
 ## Tested bytes and export
 
-The parent captures candidate bytes and modes together with the baseline,
+Protected snapshots and their live
+gate-to-export ownership are specified in the
+[verification reference](../protected_verification.md#gate-to-export-ownership).
+
+The parent captures candidate bytes and
+modes together with the baseline,
 trusted inputs, required checks, and invocation identity. Certification runs
 against protected source, tests, configuration, and runtime; writable scratch
 is separate. A writable parent directory cannot grant access to protected
@@ -138,7 +152,10 @@ children. Before/after hashes detect drift but cannot defeat a write-and-restore
 attack during execution.
 
 Scope and surface checks refer to that same snapshot. Later subprocesses,
-including benchmarks, invalidate prior acceptance if relevant inputs change.
+including setup, imports, tests and benchmarks, revoke authority before dispatch
+and require fresh assessment. An accepted assessment without a bound export
+root has no authority. Prior writable checks cannot certify subsequently
+captured bytes; applicable prerequisites run against the retained read-only target.
 Export consumes the accepted stored snapshot, verifies final integrity without
 a concurrent mutation window, and checks destination bytes and mode. An earlier
 proposer string, matching filename, or fresh read from mutable source cannot

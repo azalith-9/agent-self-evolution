@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import math
 import threading
@@ -11,7 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -29,6 +30,10 @@ class ProcessResult:
     invocation_id: str
     error: str | None = None
     sandboxed: bool = False
+    stdin_complete: bool = False
+    capture_complete: bool = False
+    stdout_bytes: bytes | None = field(default=None, repr=False)
+    stderr_bytes: bytes | None = field(default=None, repr=False)
 
 
 def redact(text: str, secrets: Iterable[str] = ()) -> str:
@@ -44,7 +49,7 @@ _REQUEST_LOCK = threading.Lock()
 _RECEIPT_FIELDS = {
     "schema_version", "invocation_id", "policy_id", "runtime_id", "snapshot_id", "scope_id",
     "launched", "exit_code", "timed_out", "cancelled", "duration_seconds", "capture_complete",
-    "containment", "cleanup_complete", "error",
+    "containment", "cleanup_complete", "error", "stdin_complete",
 }
 
 
@@ -57,7 +62,7 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _validate_receipt(evidence: object, expected: dict, supervisor_exit: int) -> dict:
+def _validate_receipt(evidence: object, expected: dict, supervisor_exit: int, *, allow_incomplete: bool = False) -> dict:
     """Check process observations against this parent's single-use invocation."""
     if supervisor_exit != 0 or not isinstance(evidence, dict) or set(evidence) != _RECEIPT_FIELDS:
         raise ValueError("invalid supervisor completion")
@@ -71,7 +76,7 @@ def _validate_receipt(evidence: object, expected: dict, supervisor_exit: int) ->
     for key, value in expected.items():
         if evidence[key] != value or type(evidence[key]) is not type(value):
             raise ValueError("supervisor binding mismatch")
-    for key in ("launched", "timed_out", "cancelled", "capture_complete", "cleanup_complete"):
+    for key in ("launched", "timed_out", "cancelled", "capture_complete", "cleanup_complete", "stdin_complete"):
         if type(evidence[key]) is not bool:
             raise ValueError("invalid supervisor Boolean field")
     exit_code = evidence["exit_code"]
@@ -90,8 +95,8 @@ def _validate_receipt(evidence: object, expected: dict, supervisor_exit: int) ->
         raise ValueError("missing execution outcome")
     if evidence["cancelled"]:
         raise ValueError("execution was cancelled")
-    if not evidence["capture_complete"]:
-        raise ValueError("incomplete process capture")
+    if not allow_incomplete and (not evidence['capture_complete'] or not evidence['stdin_complete']):
+        raise ValueError('incomplete process transport')
     if evidence["cleanup_complete"] and not evidence["containment"]["descendant_cleanup_certified"]:
         raise ValueError("uncertified cleanup")
     return evidence
@@ -121,7 +126,7 @@ def run_process(request: ExecutionRequest, *, secrets: Iterable[str] = ()) -> Pr
                                read_roots=list(request.policy.read_roots),
                                network=request.policy.network, require=True)
                         if request.policy.required else (list(request.argv), False))
-    containment = dict(backend=("linux" if sys.platform.startswith("linux") else "macos") if sandboxed else "unconfined",
+    containment = dict(backend=("bubblewrap" if sys.platform.startswith("linux") else "sandbox-exec") if sandboxed else "unconfined",
                        read_isolated=sandboxed, write_confined=sandboxed,
                        network_isolated=sandboxed and request.policy.network == "deny",
                        descendant_cleanup_certified=sys.platform.startswith("linux"))
@@ -133,7 +138,8 @@ def run_process(request: ExecutionRequest, *, secrets: Iterable[str] = ()) -> Pr
                    timeout_seconds=request.timeout_seconds,
                    cleanup_timeout_seconds=request.cleanup_timeout_seconds,
                    pid_namespace=sandboxed and sys.platform.startswith("linux"),
-                   bindings=bindings)
+                   bindings=bindings, stdin_base64=base64.b64encode(request.stdin_bytes).decode(),
+                   max_stdout_bytes=request.max_stdout_bytes, max_stderr_bytes=request.max_stderr_bytes)
     with tempfile.TemporaryDirectory(prefix="ase-process-") as directory:
         root = Path(directory)
         with (root / "stdout").open("w+b") as stdout, (root / "stderr").open("w+b") as stderr, \
@@ -159,17 +165,28 @@ def run_process(request: ExecutionRequest, *, secrets: Iterable[str] = ()) -> Pr
                 raise
             status.seek(0)
             try:
-                evidence = _validate_receipt(json.load(status, object_pairs_hook=_unique_object),
-                                             bindings, supervisor.returncode)
+                evidence = _validate_receipt(json.loads(status.read(65537), object_pairs_hook=_unique_object),
+                                             bindings, supervisor.returncode, allow_incomplete=True)
             except (ValueError, UnicodeError, KeyError, TypeError):
                 evidence = dict(exit_code=None, timed_out=False, cleanup_complete=False,
-                                error="execution supervisor produced invalid or unbound completion evidence")
+                                error="execution supervisor produced invalid or unbound completion evidence",
+                                stdin_complete=False, capture_complete=False)
             stdout.seek(0)
             stderr.seek(0)
+            out_bytes = stdout.read(request.max_stdout_bytes)
+            err_bytes = stderr.read(request.max_stderr_bytes)
+            try:
+                out_text, err_text = out_bytes.decode('utf-8'), err_bytes.decode('utf-8')
+            except UnicodeError:
+                out_text, err_text = out_bytes.decode(errors='replace'), err_bytes.decode(errors='replace')
+                evidence['capture_complete'] = False
             return ProcessResult(
-                exit_code=evidence["exit_code"], stdout=redact(stdout.read().decode(errors="replace"), selected_secrets),
-                stderr=redact(stderr.read().decode(errors="replace"), selected_secrets),
+                exit_code=evidence["exit_code"], stdout=redact(out_text, selected_secrets),
+                stderr=redact(err_text, selected_secrets),
                 timed_out=evidence["timed_out"], cleanup_complete=evidence["cleanup_complete"],
                 invocation_id=request.invocation_id,
                 error=redact(evidence["error"], selected_secrets) if evidence["error"] else None,
-                sandboxed=sandboxed)
+                sandboxed=sandboxed, stdin_complete=evidence["stdin_complete"],
+                capture_complete=evidence["capture_complete"],
+                stdout_bytes=out_bytes if not selected_secrets else None,
+                stderr_bytes=err_bytes if not selected_secrets else None)

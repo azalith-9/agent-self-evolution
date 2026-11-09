@@ -1,24 +1,14 @@
-"""Internal deployment boundary, independent of cooperative test diagnostics.
-
-No currently installed adapter supplies semantic verification across a protected
-trust boundary. In particular, pytest records, supervisor process receipts and
-persisted accepted summaries cannot authorize exporting candidate code. Refusal
-here preserves diagnostic runs without claiming a supported certification flow.
-"""
-
+"""Compact deployment summary; persisted descriptions never confer authority."""
 from __future__ import annotations
 
 from typing import Any
 
 
-def verify_deployment(env: Any, *, tool_relpath: str) -> dict[str, str]:
-    """Refuse certification when no protected semantic verifier is available.
+def verify_deployment(env: Any, *, tool_relpath: str, verification: object = None) -> dict[str, str]:
+    """Return refusal unless the final gate owns a live protected assessment.
 
-    Do not inspect attributes supplied by an execution adapter: a constructed
-    certificate or a previous JSON decision is not independently verified proof.
-    This boundary must remain closed until an actual independent oracle exists.
+    The optional context configures verification; it is not accepting evidence.
+    Gates retain the assessment and snapshot lease outside the decision mapping.
     """
-    return {
-        "schema_version": "1", "status": "unverifiable",
-        "reason": "independent_test_verification_unavailable",
-    }
+    return {'schema_version': '1', 'status': 'unverifiable',
+            'reason': 'independent_test_verification_unavailable'}

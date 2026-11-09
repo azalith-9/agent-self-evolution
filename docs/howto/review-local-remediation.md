@@ -91,13 +91,15 @@ recipe.
 ## Maintain one disposition per finding
 
 Keep durable accounting in `.review/remediation_report.md`. For a review numbered
-1–50, include exactly one primary disposition for every number:
+1–50, include exactly one primary disposition for every number, and extend the
+ledger for every new finding:
 
 | Disposition | Required evidence |
 |---|---|
 | Fixed | Concrete source changes and observed behavioral verification |
 | Already addressed | Current source/history and applicable regression evidence |
-| Invalid | Reproduction or contract evidence contradicting the claim |
+| Not adopted | Reproduction or contract evidence contradicting the claim, or a justified alternative preserves the required behavior |
+| Environmentally blocked | Missing supported-host capability or evidence; retain refusal and the incomplete acceptance requirement |
 | Deferred | Concrete blocker and the confirmed behavior still unresolved |
 
 Within each entry, retain all material subclaims and amendments, including mixed
@@ -128,11 +130,12 @@ with synthetic files and credential canaries rather than reading real secrets.
 Run focused checks before a fresh full mock-only suite from the actual
 implementation cwd. Use the prepared environment without dependency upgrades.
 Required command surfaces are `uv run --no-sync pytest tests/ -q`,
-`uv run --no-sync ruff check evolution tests`, `uv lock --check --offline`,
+`uv run --no-sync ruff check evolution tests scripts generate_*.py`, `uv lock --check --offline`,
 `uv pip check`, a `git diff --check` against the recorded baseline, and
 `uv run --no-sync pre-commit run --all-files`. Supply the exact recorded commit
 as the whitespace check's revision argument, not an inferred branch tip. Review
-any hook-generated changes before accepting results; never bypass hooks or signing to obtain a pass.
+any hook-generated changes before accepting results. Direct checks must include
+intended new files because all-file hooks normally enumerate tracked files; never bypass hooks or signing to obtain a pass.
 
 Record focused checks, the full suite, lint, whitespace, and required hooks with
 exact commands, logs, exit-status artifacts, and observed pass/fail/skip counts.
@@ -152,6 +155,24 @@ Obtain consensus review for security, architecture, and public API changes withi
 the active workflow. Record reviewers' scope, evidence, concerns, and resolutions
 or concrete blockers. Review containment, descendant cleanup, authentication
 concurrency, completion evidence, and the deliberate-forgery threat boundary.
+Record reviewed raw file hashes and ordinary modes, including new files: HEAD
+alone cannot identify an uncommitted implementation. Material corrections need
+follow-up review against updated hashes; retain disagreements and exact finding
+dispositions rather than replacing them with a consensus label.
+
+Collect version `"2"` native evidence with credential-free probes through
+production APIs. Preserve each unavailable probe and its null child exit, plus a
+separate numeric collector receipt. Neither host provisioning nor mock tests
+establish the demonstrated properties; see the
+[evidence boundary](../protected_verification.md#evidence-boundary).
+Keep acceptance/export validation incomplete unless all required
+probes and demonstrations have successful completed receipts. Distinguish `enforced`,
+`refused`, `failed`, `unavailable`, `skipped` and `not_requested`; missing Linux
+acceptance/export demonstrations remain incomplete even if refusal is correct.
+Keep semantic process/thread creation denial separate from generic detached
+descendant cleanup. macOS claims require actual macOS receipts. Do not weaken
+policy or escalate privileges to manufacture success. See the
+[native evidence contract](../protected_verification.md#native-evidence).
 
 ## Make the deliverable accessible
 
@@ -166,6 +187,15 @@ When authorized and writable, also put reviewed changes in the shared checkout
 while preserving unrelated work. Shared-checkout updates do not replace the
 patch, checksum, manifest, baseline, or application instructions.
 
+Retain at least two independent reviews collectively covering security,
+architecture and public interfaces against the exact final source identity.
+Keep individual findings and disagreements, resolve confirmed defects with
+evidence, and obtain follow-up review of consequential corrections. A consensus
+summary does not replace the independent reports. Native probes, final full
+mock-only tests, focused regressions, lint, lock/dependency checks and whitespace
+checks each need commands, source hashes, exits, counts, skips and limitations.
+Historical passing checks do not apply automatically to changed source.
+
 Exclude unrelated dirt, runtime stores and credentials. Keep unresolved defects
 and independent security/architecture review evidence alongside the package.
 Review documentation-only changes as specifications; they do not close source
@@ -178,7 +208,11 @@ Provide checksum verification and `git apply --check` instructions before any
 application. An already-modified checkout needs overlap review; do not overwrite
 it or blindly reapply the patch. Verify against an isolated baseline copy without
 changing the designated branch or worktree. Verify the patch before
-describing it as reviewed integration evidence.
+describing it as reviewed integration evidence. Include the exact baseline and
+complete intended delta, including new files, a SHA-256 manifest, individual
+reviews, finding dispositions, native evidence and verification receipts. Test
+applicability in a disposable baseline extraction without creating another
+implementation worktree or modifying the real index.
 
 Update the working-copy checkpoint while retaining historical safety context and
 backup references. Record the baseline, branch/worktree, tracking outcome, source

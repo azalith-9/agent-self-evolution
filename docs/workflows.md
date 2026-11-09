@@ -1,3 +1,10 @@
+---
+title: Workflows
+description: Execution, verification, export, and campaign progression
+doc_type: explanation
+maintenance: Update with related contracts and module boundaries
+---
+
 # Workflows
 
 Step-by-step traces of the framework's main flows.
@@ -807,8 +814,10 @@ sequenceDiagram
     participant P as proposer LM
     participant F as freeze_check
     participant G as run_code_gate
-    participant V as deployment_evidence
+    participant V as semantic_verifier
 
+    Note over CLI,V: PLANNED accepting flow; setup and prerequisite replay currently refuse
+    CLI->>CLI: validate options; reject publication; prepare context with optional export root
     CLI->>W: create(repo, base_ref) — detached worktree + editable venv
     W->>W: assert_authoritative(tools) — package resolves only from worktree (else abort)
     CLI->>Eng: repair(env, tool, visible_test)
@@ -825,24 +834,36 @@ sequenceDiagram
         end
     end
     Eng-->>CLI: RepairResult(fixed, rounds)
-    CLI->>G: run_code_gate(env, tool, visible, holdout, floor_paths)
-    G->>W: capture protected snapshot, trusted inputs and reviewed checks
-    G->>W: freeze → file scope → run_test(holdout) → comparable regression floor
-    Note over G,W: recheck scope and snapshot after every subprocess
-    G->>V: independently verify protected execution and semantic evidence
+    CLI->>CLI: confirm repair cleanup before retained capture
+    CLI->>G: run_code_gate(env, tool, visible, holdout, floor_paths, verification)
+    G->>W: retain bytes, mode, target and raw baseline identity
+    G->>W: snapshot-bound scope, surface, diagnostics, regression and benchmark
+    Note over G,W: register parent-observed prerequisites; seal retained source
+    G->>V: run every JSON-command case in a fresh protected process
+    V->>V: compare in parent; confirm cleanup; bind final epoch
     V-->>G: accepted | rejected | unverifiable
-    G-->>CLI: CodeGateResult(deploy | reject), retaining diagnostics
+    G-->>CLI: owned CodeGateResult; optional authority only with bound export root
     CLI->>CLI: write gate_decision.json + repair_trace.json
-    alt accepted verification and final integrity holds
-        CLI->>CLI: export stored snapshot bytes and mode; verify destination
+    alt accepted verification and live issued authority
+        CLI->>CLI: pass result.export_authorization to export_verified
+        CLI->>CLI: synchronize and verify destination; consume authority
     else rejected or independent proof unavailable
         Note over CLI: refuse deployment; preserve diagnostic results
     end
+    CLI->>CLI: finally close result and context; preserve any claim receipt
 ```
 
 The **held-out test must differ from the visible test** — that frozen split the proposer never saw is the anti-gaming core (a fix that hard-codes the visible test's expected value fails it). The **measurement campaign** (`python -m evolution.code.campaign`) swaps this held-out split for the upstream fix-commit's full test set plus an oracle match, harvests many organisms, and aggregates them cluster-honestly with a Wilson futility-stop — see `campaign_report.json` and the code-path `gate_decision.json` in [data_models.md](data_models.md).
 
-Both code gates call the same internal verifier. Cooperative pytest records and
+**Protected flow [PLANNED — Implementation Pending].** The semantic accepting/
+export sequence above describes the intended feature. Protected setup and
+retained-byte prerequisite replay still refuse; provisioning a host cannot
+resolve the missing implementation. See [verification blockers](protected_verification.md).
+
+Both code gates call the same internal verifier at the intended final acceptance boundary.
+The [JSON-command path](protected_verification.md) keeps expectations
+in the parent and binds accepted cases to a retained snapshot and trusted runtime.
+Cooperative pytest records and
 successful supervisor completion are diagnostic observations; they cannot prove
 required assertion semantics independently. Missing proof yields
 `independent_test_verification_unavailable`, with no deployment override. Required
@@ -853,10 +874,52 @@ Both code gates reject a test or other module modified during a validation
 subprocess before it can be reused in another check. Protected snapshot bytes
 and modes bind evidence, scope, surface and export. Source, tests, configuration,
 runtime and receipts are protected throughout certification, with separate scratch.
-Later benchmarks or subprocesses invalidate prior acceptance if relevant inputs
-change; final verification/export prevents concurrent mutation. Surface freezing also
+Every later candidate dispatch, including failed launch, first revokes authority
+and requires fresh assessment. Re-finalization clears old readiness before any
+early return. Benchmarks run against retained read-only bytes before sealing. Surface freezing also
 preserves each keyword-only parameter's required/optional status, rather than
 only comparing the total number of defaults.
+
+### Durable campaign progression
+
+**[PLANNED — Implementation Pending]** This flow targets journal version `"3"`
+with decimal-string money and durable dispatch/reconciliation records. Scoped
+recovery and callback attribution exist in version `"2"`; complete billing
+coverage, SWE-bench residual-ledger integration and actual immutable identity
+checks remain unresolved. See [recovery blockers and compatibility](campaign_recovery.md).
+
+The protected seed journal is the source of truth. Production adapters durably
+attribute observations, reconcile billing coverage and restore known spend before
+dispatch. Unknown liability blocks finite-budget work. Monitor reconstruction uses
+read-only pinned inspection and complete ordered caller identity. Every writer
+establishes its current-process session; replayed prior sessions cannot authorize
+dispatch. See the [recovery contract](campaign_recovery.md).
+
+```text
+lock journal, validate identity and durable replay
+  → reconstruct due aggregates, stage stops and configured limits
+  → synchronize current-process session_started with inherited or increased total ceiling
+  → restore known costs and refuse unknown finite-budget capacity
+  → register any paid preparation; persist its costs and coverage reconciliation
+  → reuse committed seed results
+  → synchronize seed_started with unique attempt identity
+  → verify and retain actual provider/runtime/harness/dataset/image identities
+  → durably register billable dispatch ownership, including retries/preparation
+  → execute one outstanding seed
+  → reconcile dispatch coverage and synchronize observed costs/uncertain liability
+  → synchronize seed_completed or seed_inconclusive
+  → synchronize organism_completed after all requested seeds
+  → synchronize stage_decided before advancing
+  → regenerate compatibility ledger and report
+```
+
+Inconclusive attempts retain unknown possible spend without completing a seed.
+Recovered starts need an inconclusive terminal before a distinct linked retry. An interrupted
+commit stops dependent work; reopening may discover and reuse a valid result
+whose acknowledgment was lost. Resume rebuilds missing aggregates before any
+new measurement, honors a committed futility stop and never counts partial
+organisms as fully measured. Whole-organism injection retains its narrower
+explicit durability contract. See the [resume guide](howto/resume-code-campaign.md).
 
 ## Workflow 15: Triage sentinel — scan, then optionally attempt (Tier 5)
 
@@ -883,7 +946,7 @@ sequenceDiagram
     S-->>CLI: list[RepairCandidate]
     CLI->>Q: build_queue + write_queue → triage_queue.json + triage_report.md
     alt --attempt-top K > 0  (requires --max-cost-usd)
-        CLI->>A: attempt_candidates(top K, max_cost_usd)
+        CLI->>A: attempt_candidates(top K, max_cost_usd, progress_root)
         loop each candidate until cost ceiling
             A->>RL: worktree → repair → oracle gate (Workflow 14, verbatim)
             RL-->>A: deploy_reachable verdict
@@ -892,6 +955,12 @@ sequenceDiagram
     end
     Note over CLI,Q: never opens a PR — a human reads the queue and decides what to deploy
 ```
+
+**Monitor recovery:** With `--progress-root`, a protected journal freezes the ordered selected queue,
+reuses committed work and rebuilds annotations. Without it attempts are labeled
+nonrecoverable. Both harvesting and attempts connect through the lazy
+`evolution.composition.monitor_code` seam; monitor domain modules import no
+concrete Tier-4 implementation.
 
 The scan is free and schedulable; the attempt is the only step that spends and **requires `--max-cost-usd`** (the CLI refuses to run the loop uncapped), and the wrapper + launchd template enforce scan-only scheduling. See [operating_the_sentinel.md](operating_the_sentinel.md) for the verdict taxonomy and the dependency-regression caveat, and the `triage_queue.json` schema in [data_models.md](data_models.md).
 

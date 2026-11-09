@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import ctypes
+import selectors
 import json
 import os
 import signal
@@ -19,8 +21,7 @@ def _descendants(root: int) -> set[int]:
             if item.name.isdigit():
                 try:
                     fields = (item / "stat").read_text().rsplit(") ", 1)[1].split()
-                    if fields[0] != "Z":
-                        parents[int(item.name)] = int(fields[1])
+                    parents[int(item.name)] = int(fields[1])
                 except (OSError, IndexError, ValueError):
                     continue
     else:
@@ -56,17 +57,19 @@ def _cleanup(proc: subprocess.Popen | None, deadline: float) -> bool:
                 pass
         if proc is not None:
             proc.poll()
+        no_children = False
         while True:
             try:
                 pid, _ = os.waitpid(-1, os.WNOHANG)
                 if pid == 0:
                     break
             except ChildProcessError:
+                no_children = True
                 break
-        if not _descendants(os.getpid()):
+        if no_children and not _descendants(os.getpid()):
             return True
         time.sleep(0.01)
-    return not _descendants(os.getpid())
+    return False
 
 
 def main() -> None:
@@ -75,7 +78,7 @@ def main() -> None:
     started = time.monotonic()
     status = {**request["bindings"], "exit_code": None, "timed_out": False,
               "cleanup_complete": False, "error": None, "launched": False,
-              "cancelled": False, "capture_complete": False, "duration_seconds": 0.0}
+              "cancelled": False, "capture_complete": False, "stdin_complete": False, "duration_seconds": 0.0}
     proc = None
     subreaper = False
     if sys.platform.startswith("linux"):
@@ -88,14 +91,75 @@ def main() -> None:
     signal.signal(signal.SIGINT, cancelled)
     try:
         proc = subprocess.Popen(request["argv"], cwd=request["cwd"], env=request["env"],
-                                stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True)
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True, close_fds=True)
         status["launched"] = True
         deadline = time.monotonic() + request["timeout_seconds"]
-        while proc.poll() is None:
-            if time.monotonic() >= deadline:
-                status["timed_out"] = True
-                break
-            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+        payload = memoryview(base64.b64decode(request.get("stdin_base64", ""), validate=True))
+        delivered = 0
+        captures = {"stdout": bytearray(), "stderr": bytearray()}
+        capture_complete = True
+        eof = set()
+        with selectors.DefaultSelector() as selector:
+            for name in ("stdout", "stderr"):
+                pipe = getattr(proc, name)
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, name)
+            os.set_blocking(proc.stdin.fileno(), False)
+            if payload:
+                selector.register(proc.stdin, selectors.EVENT_WRITE, "stdin")
+            else:
+                status["stdin_complete"] = True
+                proc.stdin.close()
+            while selector.get_map():
+                if time.monotonic() >= deadline:
+                    status["timed_out"] = True
+                    break
+                for key, mask in selector.select(min(.02, max(0, deadline - time.monotonic()))):
+                    if key.data == "stdin":
+                        try:
+                            delivered += os.write(key.fd, payload[delivered:delivered + 65536])
+                        except BrokenPipeError:
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        if delivered == len(payload):
+                            status["stdin_complete"] = True
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                    else:
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            eof.add(key.data)
+                            selector.unregister(key.fileobj)
+                            key.fileobj.close()
+                            continue
+                        name = key.data
+                        room = request.get("max_" + name + "_bytes", 1048576) - len(captures[name])
+                        captures[name].extend(chunk[:room])
+                        if len(chunk) > room:
+                            capture_complete = False
+                if not capture_complete:
+                    break
+                if proc.poll() is not None:
+                    # Cleanup descendants before waiting on their inherited output pipes.
+                    if not _cleanup(proc, min(deadline, time.monotonic() + request["cleanup_timeout_seconds"])):
+                        break
+            if capture_complete and not status["timed_out"] and proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(.001, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    status["timed_out"] = True
+        for name in ("stdout", "stderr"):
+            destination = getattr(sys, name).buffer
+            destination.write(captures[name])
+            destination.flush()
+            pipe = getattr(proc, name)
+            if not pipe.closed:
+                pipe.close()
+        if not proc.stdin.closed:
+            proc.stdin.close()
+        status["capture_complete"] = capture_complete and eof == {"stdout", "stderr"} and not status["timed_out"]
         status["exit_code"] = proc.returncode
     except (OSError, ValueError, RuntimeError, InterruptedError) as exc:
         status["cancelled"] = isinstance(exc, InterruptedError)
@@ -113,7 +177,6 @@ def main() -> None:
             status["error"] = f"process cleanup failed: {exc}"
         if proc is not None and status["exit_code"] is None:
             status["exit_code"] = proc.poll()
-        status["capture_complete"] = True
         status["duration_seconds"] = time.monotonic() - started
         with os.fdopen(status_fd, "w") as destination:
             json.dump(status, destination)
