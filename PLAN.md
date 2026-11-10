@@ -835,7 +835,7 @@ See the **Constraints & Guardrails** section above for the full enforcement list
 
 1. Should the optimization skill live in the repo (bundled) or Skills Hub (optional install)?
    - Recommendation: Core orchestration in repo, optimization engines as optional dependencies
-   
+
 2. How do we build evaluation datasets for skills that don't have much usage history?
    - Option A: LLM-generated synthetic test cases
    - Option B: Manual curation by skill authors

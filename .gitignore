@@ -42,3 +42,9 @@ reports/*.pins.json
 # swebench build logs + local Task 0 spike scripts
 logs/
 scratch/
+
+# Agent files
+.amplihack/
+.claude/
+.review/
+CHECKPOINT.md

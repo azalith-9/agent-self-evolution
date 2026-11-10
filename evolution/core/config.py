@@ -114,5 +114,3 @@ class EvolutionConfig:
     create_pr: bool = False
 
     seed: int = 42
-
-

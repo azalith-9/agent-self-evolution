@@ -23,7 +23,6 @@ from pathlib import Path
 
 from evolution.core.config import EvolutionConfig
 from evolution.core.dataset_builder import SyntheticDatasetBuilder
-from evolution.core.skill_sources import discover_skill_sources
 from evolution.skills.skill_module import find_skill, load_skill
 
 
