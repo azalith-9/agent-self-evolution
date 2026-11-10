@@ -52,3 +52,6 @@ scratch/
 *.pid
 /checkpoints/
 /CHECKPOINT.md
+
+# Runtime hook artifacts
+.github/hooks/
